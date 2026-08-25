@@ -7,10 +7,6 @@ formats — solving the many-payments-to-one-payout aggregation problem determin
 calling an LLM only on the residual, and reporting every match with a calibrated confidence
 and every exception with a typed root cause, an evidence chain, and a rupee figure.
 
-> **Status: Step 1 of 14 — synthetic data and ground truth.** The money module, the Pydantic
-> contracts, and the seeded generator with all eleven anomaly classes are in place and tested.
-> No matching logic exists yet. Headline metrics will appear here once `make eval` can generate
-> them; nothing in this file will be hand-typed.
 
 ## Generating data
 
