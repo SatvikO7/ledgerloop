@@ -37,13 +37,14 @@ declared settlement nets exactly, modulo the deltas each anomaly explicitly decl
 
 A committed 60-order fixture set lives in `data/fixtures/dev-standard-42/`.
 
-See [PLAN.md](PLAN.md) for the full project plan and [ARCHITECTURE.md](ARCHITECTURE.md) for the
-data model and the definitions the evaluation depends on.
+The data model and the definitions the evaluation depends on are documented in the modules
+themselves — `models/truth.py` for the link-level ground truth, `eval/metrics.py` for the
+metric definitions, and `money.py` for the integer-minor-unit invariant. The `§` references
+in those docstrings point at an internal design document that is not published.
 
 ## MVP scope
 
-Four scope decisions taken before implementation, each recorded with its reasoning in
-`ARCHITECTURE.md` §5:
+Four scope decisions taken before implementation:
 
 | Decision | Rationale |
 |---|---|

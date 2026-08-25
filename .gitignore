@@ -23,6 +23,14 @@ EVALUATION.md
 # Private development notes and per-step documentation. Never published.
 .local/
 
+# Internal planning and design documents. Kept on disk and actively used --
+# PROGRESS.md is the session handoff and PLAN.md is the source of the §
+# citations throughout the code -- but deliberately not published.
+PLAN.md
+ARCHITECTURE.md
+IMPLEMENTATION_PLAN.md
+PROGRESS.md
+
 # Editor / tooling local state.
 .claude/
 .vscode/
