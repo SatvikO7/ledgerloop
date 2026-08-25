@@ -184,10 +184,10 @@ These are settled. Do not re-litigate them; `ARCHITECTURE.md` has the full reaso
 | | |
 |---|---|
 | Local repo | initialised, branch `main`, working tree clean |
-| Commits | `8eb6f91` Step 0 · `a7042fa` Step 1 |
-| Tracked files | 56 |
-| Remote | **none configured** |
-| Pushed | **nothing yet** |
+| Commits | `8eb6f91` Step 0 · `a7042fa` Step 1 · `46f4117` handoff |
+| Tracked files | 57 |
+| Remote | `origin` → `https://github.com/SatvikO7/ledgerloop.git` (**private**) |
+| Pushed | all three commits; `main` tracks `origin/main` |
 
 Excluded from the repo and verified: `.local/`, `.claude/`, `.venv/`, `data/generated/`,
 `.hypothesis/`, `.env`, caches. No secret-shaped files are tracked.
@@ -196,21 +196,12 @@ Excluded from the repo and verified: `.local/`, `.claude/`, `.venv/`, `data/gene
 
 ## 9. Blockers and pending setup
 
-**One blocker: the GitHub remote does not exist.**
-
-This session had no `gh` CLI, no `GITHUB_TOKEN` / `GH_TOKEN`, no git credential helper,
-and no GitHub connector tool — so the repository could not be created from here. The user
-chose to create it manually.
-
-**Unblocking sequence** (repo must be **private**, named `ledgerloop`, created empty —
-no README/licence/gitignore, since the repo already has them):
-
-```bash
-git remote add origin <url>
-git push -u origin main
-```
-
-Both commits push together. Nothing is lost by the delay.
+**No blockers.** The former one — the missing GitHub remote — is resolved. The `gh` CLI is
+now installed (`winget install GitHub.cli`) and authenticates as `SatvikO7` using the
+OAuth token already in Windows Credential Manager (`repo`, `workflow`, `gist` scopes),
+retrievable with `git credential fill`. It lacks `read:org`, so `gh auth login --with-token`
+is rejected; export it as `GH_TOKEN` for `gh` commands instead, or run
+`gh auth login --web` once to get a full-scope token.
 
 **Not blockers, but pending:** no CI workflow yet (planned alongside Step 2's eval gate);
 no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
@@ -219,9 +210,7 @@ no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
 
 ## 10. Exact next action
 
-1. **If the user provides the repo URL:** `git remote add origin <url>` then
-   `git push -u origin main`.
-2. **Then begin Step 2 — the eval harness**, in this order:
+1. **Begin Step 2 — the eval harness**, in this order:
    - `src/ledgerloop/eval/metrics.py` — link-level precision / recall / F1 against
      `GroundTruth.evaluation_pairs`, with a **confidence interval** on precision
      (`LinkMetrics.precision_ci_low/high` already exist). Match rate denominator is
@@ -235,7 +224,7 @@ no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
    - Tests: metric correctness on hand-built tiny truth sets, the CI-bound edge cases
      (zero predictions, zero truth), and B0 producing a plausible non-trivial number on
      the fixture.
-3. Write `.local/steps/step-02-eval-harness.md`, commit, push.
+2. Write `.local/steps/step-02-eval-harness.md`, commit, push.
 
 **Do not** start ingest or any matching tier before the harness produces a number.
 

@@ -64,9 +64,8 @@ Every step from here ends with all of:
 - Private step documentation written to `.local/steps/step-NN-*.md` (never committed)
 - Implementation committed and pushed
 
-> **Push is currently blocked** — no git remote is configured yet. Steps 0 and 1 are
-> committed locally and will be pushed together once the GitHub repository exists.
-> See `PROGRESS.md` for the exact unblocking command.
+> The remote is `SatvikO7/ledgerloop` (private), tracked as `origin/main`. Steps 0 and 1
+> are pushed; every step from here pushes as part of its definition of done.
 
 ---
 
