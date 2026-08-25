@@ -1,0 +1,429 @@
+{
+  "settlements": [
+    {
+      "adjustments_paise": 0,
+      "fee_paise": 442948,
+      "gross_paise": 22147400,
+      "merchant_id": "MRCH_0001",
+      "net_paise": 21644621,
+      "payments": [
+        {
+          "amount_paise": 3933600,
+          "captured_at": "2026-03-02T15:47:57",
+          "order_ref": "ORD-2026-000046",
+          "payment_id": "PAY-00001"
+        },
+        {
+          "amount_paise": 1806500,
+          "captured_at": "2026-03-03T13:13:34",
+          "order_ref": "ORD‑2026‑000052",
+          "payment_id": "PAY-00002"
+        },
+        {
+          "amount_paise": 716300,
+          "captured_at": "2026-03-03T18:32:28",
+          "order_ref": "ORD-2026-000037",
+          "payment_id": "PAY-00003"
+        },
+        {
+          "amount_paise": 3229900,
+          "captured_at": "2026-03-04T09:25:47",
+          "order_ref": null,
+          "payment_id": "PAY-00004"
+        },
+        {
+          "amount_paise": 109900,
+          "captured_at": "2026-03-05T19:07:10",
+          "order_ref": "ORD-2026-000028",
+          "payment_id": "PAY-00005"
+        },
+        {
+          "amount_paise": 1307100,
+          "captured_at": "2026-03-06T19:29:23",
+          "order_ref": "ORD-2026-000031",
+          "payment_id": "PAY-00006"
+        },
+        {
+          "amount_paise": 4474500,
+          "captured_at": "2026-03-09T09:12:31",
+          "order_ref": "ORD-2026-000013",
+          "payment_id": "PAY-00007"
+        },
+        {
+          "amount_paise": 364200,
+          "captured_at": "2026-03-13T14:31:39",
+          "order_ref": "ORD-2026-000010",
+          "payment_id": "PAY-00008"
+        },
+        {
+          "amount_paise": 914600,
+          "captured_at": "2026-03-13T15:30:44",
+          "order_ref": "ORD-2026-000034",
+          "payment_id": "PAY-00009"
+        },
+        {
+          "amount_paise": 3984800,
+          "captured_at": "2026-03-13T17:56:47",
+          "order_ref": "ORD-2026-000043",
+          "payment_id": "PAY-00010"
+        },
+        {
+          "amount_paise": 1306000,
+          "captured_at": "2026-03-16T19:13:38",
+          "order_ref": "ORD-2026-000055",
+          "payment_id": "PAY-00011"
+        }
+      ],
+      "settled_on": "2026-03-17",
+      "settlement_id": "SETL-0001",
+      "tax_paise": 79731,
+      "utr": "UTR2026031745389"
+    },
+    {
+      "adjustments_paise": 0,
+      "fee_paise": 435428,
+      "gross_paise": 21771400,
+      "merchant_id": "MRCH_0001",
+      "net_paise": 21257594,
+      "payments": [
+        {
+          "amount_paise": 4265200,
+          "captured_at": "2026-03-17T15:05:56",
+          "order_ref": "ord 2026 000001",
+          "payment_id": "PAY-00012"
+        },
+        {
+          "amount_paise": 305900,
+          "captured_at": "2026-03-22T10:00:36",
+          "order_ref": "ord 2026 000025",
+          "payment_id": "PAY-00013"
+        },
+        {
+          "amount_paise": 1874700,
+          "captured_at": "2026-03-22T14:32:55",
+          "order_ref": "ORD-2026-000019",
+          "payment_id": "PAY-00014"
+        },
+        {
+          "amount_paise": 2371100,
+          "captured_at": "2026-03-23T17:18:09",
+          "order_ref": "ORD-2026-000004",
+          "payment_id": "PAY-00015"
+        },
+        {
+          "amount_paise": 1839200,
+          "captured_at": "2026-03-24T11:32:47",
+          "order_ref": "ORD-2026-000007",
+          "payment_id": "PAY-00016"
+        },
+        {
+          "amount_paise": 3686900,
+          "captured_at": "2026-03-25T10:25:01",
+          "order_ref": "ORD-2026-000022",
+          "payment_id": "PAY-00017"
+        },
+        {
+          "amount_paise": 2094600,
+          "captured_at": "2026-03-26T14:47:43",
+          "order_ref": "ORD-2026-000049",
+          "payment_id": "PAY-00018"
+        },
+        {
+          "amount_paise": 4679100,
+          "captured_at": "2026-03-27T09:22:16",
+          "order_ref": "ord 2026 000016",
+          "payment_id": "PAY-00019"
+        },
+        {
+          "amount_paise": 654700,
+          "captured_at": "2026-03-28T14:40:57",
+          "order_ref": "ORD-2026-000058",
+          "payment_id": "PAY-00020"
+        }
+      ],
+      "settled_on": "2026-03-29",
+      "settlement_id": "SETL-0002",
+      "tax_paise": 78378,
+      "utr": "UTR2026032958884"
+    },
+    {
+      "adjustments_paise": -2429800,
+      "fee_paise": 548458,
+      "gross_paise": 27422900,
+      "merchant_id": "MRCH_0002",
+      "net_paise": 24345919,
+      "payments": [
+        {
+          "amount_paise": 890000,
+          "captured_at": "2026-03-08T09:12:51",
+          "order_ref": "ORD‑2026‑000047",
+          "payment_id": "PAY-00021"
+        },
+        {
+          "amount_paise": 2429800,
+          "captured_at": "2026-03-09T12:25:19",
+          "order_ref": "ORD-2026-000041",
+          "payment_id": "PAY-00022"
+        },
+        {
+          "amount_paise": 1495600,
+          "captured_at": "2026-03-09T19:55:18",
+          "order_ref": "ORD-2026-000032",
+          "payment_id": "PAY-00023"
+        },
+        {
+          "amount_paise": 3944900,
+          "captured_at": "2026-03-10T22:58:12",
+          "order_ref": "ORD-2026-000029",
+          "payment_id": "PAY-00024"
+        },
+        {
+          "amount_paise": 4620800,
+          "captured_at": "2026-03-11T06:17:12",
+          "order_ref": "ORD-2026-000035",
+          "payment_id": "PAY-00025"
+        },
+        {
+          "amount_paise": 457700,
+          "captured_at": "2026-03-11T15:21:57",
+          "order_ref": "ORD‑2026‑000023",
+          "payment_id": "PAY-00026"
+        },
+        {
+          "amount_paise": 3588100,
+          "captured_at": "2026-03-14T18:04:46",
+          "order_ref": "ORD-2026-000014",
+          "payment_id": "PAY-00027"
+        },
+        {
+          "amount_paise": 3282000,
+          "captured_at": "2026-03-15T10:56:46",
+          "order_ref": "ORD-2026-000056",
+          "payment_id": "PAY-00028"
+        },
+        {
+          "amount_paise": 3524200,
+          "captured_at": "2026-03-16T06:19:51",
+          "order_ref": "ord 2026 000005",
+          "payment_id": "PAY-00029"
+        },
+        {
+          "amount_paise": 3189800,
+          "captured_at": "2026-03-17T14:47:41",
+          "order_ref": null,
+          "payment_id": "PAY-00030"
+        }
+      ],
+      "settled_on": "2026-03-18",
+      "settlement_id": "SETL-0003",
+      "tax_paise": 98723,
+      "utr": "UTR2026031892729"
+    },
+    {
+      "adjustments_paise": -890000,
+      "fee_paise": 388820,
+      "gross_paise": 19441000,
+      "merchant_id": "MRCH_0002",
+      "net_paise": 18092192,
+      "payments": [
+        {
+          "amount_paise": 831600,
+          "captured_at": "2026-03-18T13:37:07",
+          "order_ref": "ORD-2026-000050",
+          "payment_id": "PAY-00031"
+        },
+        {
+          "amount_paise": 587800,
+          "captured_at": "2026-03-19T12:48:49",
+          "order_ref": "ORD-2026-000011",
+          "payment_id": "PAY-00032"
+        },
+        {
+          "amount_paise": 3908300,
+          "captured_at": "2026-03-19T14:29:47",
+          "order_ref": "ORD-2026-000053",
+          "payment_id": "PAY-00033"
+        },
+        {
+          "amount_paise": 2239800,
+          "captured_at": "2026-03-20T22:55:32",
+          "order_ref": "ORD-2026-000026",
+          "payment_id": "PAY-00034"
+        },
+        {
+          "amount_paise": 4377300,
+          "captured_at": "2026-03-21T20:31:39",
+          "order_ref": "ORD-2026-000008",
+          "payment_id": "PAY-00035"
+        },
+        {
+          "amount_paise": 947800,
+          "captured_at": "2026-03-21T21:36:37",
+          "order_ref": "ORD-2026-000038",
+          "payment_id": "PAY-00036"
+        },
+        {
+          "amount_paise": 1272900,
+          "captured_at": "2026-03-24T13:33:58",
+          "order_ref": "ORD-2026-000002",
+          "payment_id": "PAY-00037"
+        },
+        {
+          "amount_paise": 1741200,
+          "captured_at": "2026-03-25T11:10:54",
+          "order_ref": "ORD-2026-000044",
+          "payment_id": "PAY-00038"
+        },
+        {
+          "amount_paise": 2373900,
+          "captured_at": "2026-03-25T18:12:14",
+          "order_ref": "ORD-2026-000059",
+          "payment_id": "PAY-00039"
+        },
+        {
+          "amount_paise": 1160400,
+          "captured_at": "2026-03-25T18:20:45",
+          "order_ref": "ORD-2026-000017",
+          "payment_id": "PAY-00040"
+        }
+      ],
+      "settled_on": "2026-03-26",
+      "settlement_id": "SETL-0004",
+      "tax_paise": 69988,
+      "utr": "UTR2026032632844"
+    },
+    {
+      "adjustments_paise": 0,
+      "fee_paise": 1125232,
+      "gross_paise": 56261600,
+      "merchant_id": "MRCH_0003",
+      "net_paise": 54933826,
+      "payments": [
+        {
+          "amount_paise": 4783800,
+          "captured_at": "2026-03-01T08:48:13",
+          "order_ref": "ORD-2026-000030",
+          "payment_id": "PAY-00041"
+        },
+        {
+          "amount_paise": 3556000,
+          "captured_at": "2026-03-01T15:52:31",
+          "order_ref": "ORD-2026-000042",
+          "payment_id": "PAY-00042"
+        },
+        {
+          "amount_paise": 3894900,
+          "captured_at": "2026-03-02T07:54:48",
+          "order_ref": "ORD-2026-000048",
+          "payment_id": "PAY-00043"
+        },
+        {
+          "amount_paise": 1832000,
+          "captured_at": "2026-03-03T09:06:10",
+          "order_ref": "ORD-2026-000021",
+          "payment_id": "PAY-00044"
+        },
+        {
+          "amount_paise": 4527200,
+          "captured_at": "2026-03-05T11:02:08",
+          "order_ref": "ORD-2026-000012",
+          "payment_id": "PAY-00045"
+        },
+        {
+          "amount_paise": 3302300,
+          "captured_at": "2026-03-08T16:27:28",
+          "order_ref": null,
+          "payment_id": "PAY-00046"
+        },
+        {
+          "amount_paise": 4566400,
+          "captured_at": "2026-03-09T15:27:32",
+          "order_ref": "ORD-2026-000060",
+          "payment_id": "PAY-00047"
+        },
+        {
+          "amount_paise": 567600,
+          "captured_at": "2026-03-12T16:10:25",
+          "order_ref": "ORD-2026-000003",
+          "payment_id": "PAY-00048"
+        },
+        {
+          "amount_paise": 2064900,
+          "captured_at": "2026-03-12T17:49:02",
+          "order_ref": "ORD-2026-000045",
+          "payment_id": "PAY-00049"
+        },
+        {
+          "amount_paise": 327900,
+          "captured_at": "2026-03-13T10:15:35",
+          "order_ref": null,
+          "payment_id": "PAY-00050"
+        },
+        {
+          "amount_paise": 3065100,
+          "captured_at": "2026-03-13T17:15:13",
+          "order_ref": "ORD-2026-000051",
+          "payment_id": "PAY-00051"
+        },
+        {
+          "amount_paise": 2302500,
+          "captured_at": "2026-03-14T17:42:53",
+          "order_ref": "ord 2026 000033",
+          "payment_id": "PAY-00052"
+        },
+        {
+          "amount_paise": 3953600,
+          "captured_at": "2026-03-17T17:38:31",
+          "order_ref": "ORD‑2026‑000027",
+          "payment_id": "PAY-00053"
+        },
+        {
+          "amount_paise": 620000,
+          "captured_at": "2026-03-19T19:21:52",
+          "order_ref": "ORD-2026-000024",
+          "payment_id": "PAY-00054"
+        },
+        {
+          "amount_paise": 2190000,
+          "captured_at": "2026-03-20T06:26:34",
+          "order_ref": "ORD-2026-000015",
+          "payment_id": "PAY-00055"
+        },
+        {
+          "amount_paise": 3273800,
+          "captured_at": "2026-03-23T08:32:42",
+          "order_ref": "ORD-2026-000018",
+          "payment_id": "PAY-00056"
+        },
+        {
+          "amount_paise": 1763400,
+          "captured_at": "2026-03-24T15:43:50",
+          "order_ref": "ORD-2026-000036",
+          "payment_id": "PAY-00057"
+        },
+        {
+          "amount_paise": 4794400,
+          "captured_at": "2026-03-25T16:16:27",
+          "order_ref": "ORD-2026-000006",
+          "payment_id": "PAY-00058"
+        },
+        {
+          "amount_paise": 522200,
+          "captured_at": "2026-03-25T18:33:25",
+          "order_ref": null,
+          "payment_id": "PAY-00059"
+        },
+        {
+          "amount_paise": 4353600,
+          "captured_at": "2026-03-25T19:16:45",
+          "order_ref": "ORD-2026-000039",
+          "payment_id": "PAY-00060"
+        }
+      ],
+      "settled_on": "2026-04-03",
+      "settlement_id": "SETL-0005",
+      "tax_paise": 202542,
+      "utr": "UTR2026032629136"
+    }
+  ]
+}

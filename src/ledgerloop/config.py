@@ -35,6 +35,7 @@ __all__ = [
     "LLMConfig",
     "MatchingTolerances",
     "RunConfig",
+    "prevalence_for",
 ]
 
 
@@ -179,6 +180,38 @@ STANDARD_PREVALENCE: dict[AnomalyClass, float] = {
     AnomalyClass.LATE_ARRIVAL: 0.01,
 }
 
+#: Share of scenario draws that are CLEAN at each difficulty (PLAN.md §5.2's
+#: "difficulty dial"). The non-clean classes keep their relative proportions and
+#: are rescaled to fill the remainder, so turning the dial changes *how much*
+#: goes wrong without changing *what* goes wrong -- which is what makes the
+#: three difficulty columns comparable to each other.
+_CLEAN_SHARE_BY_DIFFICULTY: dict[Difficulty, float] = {
+    Difficulty.EASY: 0.85,
+    Difficulty.STANDARD: 0.67,
+    Difficulty.HARD: 0.50,
+}
+
+
+def prevalence_for(difficulty: Difficulty) -> dict[AnomalyClass, float]:
+    """Anomaly prevalence at the given difficulty.
+
+    ``CLEAN`` is computed as ``1 - sum(others)`` rather than taken from the
+    table, so the result sums to exactly 1.0 in floating point and the
+    :class:`GeneratorConfig` validator cannot be tripped by scaling residue.
+    """
+    clean_share = _CLEAN_SHARE_BY_DIFFICULTY[difficulty]
+    others = {
+        anomaly: weight
+        for anomaly, weight in STANDARD_PREVALENCE.items()
+        if anomaly is not AnomalyClass.CLEAN
+    }
+    scale = (1.0 - clean_share) / sum(others.values())
+    scaled: dict[AnomalyClass, float] = {
+        anomaly: weight * scale for anomaly, weight in others.items()
+    }
+    return {AnomalyClass.CLEAN: 1.0 - sum(scaled.values()), **scaled}
+
+
 #: Order counts per split. ``TRAIN`` is the addition the plan lacked -- the
 #: blender needs its own fitting data so the calibrator never sees in-sample
 #: scores. See SplitName's docstring.
@@ -200,8 +233,35 @@ class GeneratorConfig(FrozenLedgerModel):
     order_count: int | None = Field(
         default=None, description="Overrides the split default when set."
     )
-    prevalence: dict[AnomalyClass, float] = Field(default_factory=lambda: dict(STANDARD_PREVALENCE))
-    generator_version: str = Field(default="0.1.0")
+    prevalence: dict[AnomalyClass, float] = Field(
+        default_factory=lambda: dict(STANDARD_PREVALENCE),
+        description="Left unset, this is derived from `difficulty`. Set it "
+        "explicitly to override the dial entirely.",
+    )
+    generator_version: str = Field(default="0.2.0")
+    ensure_class_coverage: bool = Field(
+        default=False,
+        description="After the prevalence draw, force-apply any anomaly class that "
+        "produced no effect. This DISTORTS prevalence, so it stays off for every "
+        "evaluated split. It exists for the committed fixture set, whose job is to "
+        "exercise every code path rather than to be statistically representative -- "
+        "a 60-order dataset simply has too few settlements to be near-certain of "
+        "containing a 2%-prevalence class.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _prevalence_follows_difficulty(cls, data: object) -> object:
+        """Derive prevalence from the difficulty dial unless it was given explicitly.
+
+        A ``before`` validator rather than an ``after`` one because the model is
+        frozen: by the time an ``after`` validator runs, the field can no longer
+        be assigned.
+        """
+        if isinstance(data, dict) and data.get("prevalence") is None:
+            difficulty = Difficulty(data.get("difficulty", Difficulty.STANDARD))
+            return {**data, "prevalence": prevalence_for(difficulty)}
+        return data
 
     @model_validator(mode="after")
     def _prevalence_sums_to_one(self) -> GeneratorConfig:

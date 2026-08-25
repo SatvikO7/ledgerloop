@@ -1,0 +1,33 @@
+{
+  "counts": {
+    "bank_txns": 23,
+    "effects_applied": 13,
+    "evaluation_pairs": 59,
+    "orders": 60,
+    "payments": 60,
+    "reconcilable_records": 135,
+    "settlements": 5,
+    "truth_links": 187,
+    "unmatchable_records": 13
+  },
+  "difficulty": "standard",
+  "generator_version": "0.2.0",
+  "money": {
+    "declared_bank_delta_paise": 39349788,
+    "declared_net_total_paise": 140274152,
+    "settled_credit_total_paise": 179623940
+  },
+  "scenario_draws": {
+    "A01_CLEAN": 38,
+    "A02_ROUNDING_DRIFT": 3,
+    "A03_FEE_TAX_MISMATCH": 7,
+    "A04_TIMING_SHIFT": 1,
+    "A05_DUPLICATE_CREDIT": 1,
+    "A06_POST_SETTLEMENT_REFUND": 4,
+    "A08_CHARGEBACK_NETTED": 3,
+    "A09_SPLIT_PAYOUT": 2,
+    "A12_LATE_ARRIVAL": 1
+  },
+  "seed": 42,
+  "split": "dev"
+}

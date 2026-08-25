@@ -90,6 +90,16 @@ class GroundTruth(LedgerModel):
     links: tuple[GroundTruthLink, ...] = ()
     records: tuple[GroundTruthRecord, ...] = ()
 
+    scenario_draws: dict[AnomalyClass, int] = Field(
+        default_factory=dict,
+        description="How many times each anomaly was *drawn* during generation, one "
+        "draw per order. This is what prevalence is checked against, and it is not "
+        "the same as counting labelled records: a single A10 draw injects an orphan "
+        "bank credit while leaving its order clean, and a single A09 draw relabels "
+        "one settlement while touching two bank rows. Counting records would make "
+        "the configured prevalence unverifiable.",
+    )
+
     @model_validator(mode="after")
     def _unique_records(self) -> GroundTruth:
         seen: set[str] = set()
@@ -158,11 +168,25 @@ class GroundTruth(LedgerModel):
         )
 
     def anomaly_counts(self) -> Mapping[AnomalyClass, int]:
-        """Realised prevalence per class -- checked against config in Step 1."""
+        """Labelled records per class.
+
+        Reports what each anomaly actually *touched*. For the configured
+        prevalence check use :meth:`realised_prevalence` instead -- see
+        :attr:`scenario_draws`.
+        """
         counts: dict[AnomalyClass, int] = dict.fromkeys(AnomalyClass, 0)
         for record in self.records:
             counts[record.anomaly_class] += 1
         return counts
+
+    def realised_prevalence(self) -> Mapping[AnomalyClass, float]:
+        """Observed draw frequency per class, comparable to the configured weights."""
+        total = sum(self.scenario_draws.values())
+        if total == 0:
+            return dict.fromkeys(AnomalyClass, 0.0)
+        return {
+            anomaly: self.scenario_draws.get(anomaly, 0) / total for anomaly in AnomalyClass
+        }
 
     def impact_total_minor(self, refs: Iterable[str] | None = None) -> int:
         """Total money at stake across the given records (all records if ``None``)."""

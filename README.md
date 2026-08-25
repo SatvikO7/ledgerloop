@@ -7,10 +7,35 @@ formats — solving the many-payments-to-one-payout aggregation problem determin
 calling an LLM only on the residual, and reporting every match with a calibrated confidence
 and every exception with a typed root cause, an evidence chain, and a rupee figure.
 
-> **Status: Step 0 of 14 — data contracts.** The money module, the Pydantic contracts and the
-> deferred-infrastructure interfaces are in place and tested. No matching logic exists yet.
-> Headline metrics will appear here once `make eval` can generate them; nothing in this file
-> will be hand-typed.
+> **Status: Step 1 of 14 — synthetic data and ground truth.** The money module, the Pydantic
+> contracts, and the seeded generator with all eleven anomaly classes are in place and tested.
+> No matching logic exists yet. Headline metrics will appear here once `make eval` can generate
+> them; nothing in this file will be hand-typed.
+
+## Generating data
+
+```bash
+ledgerloop generate --split test --difficulty standard --seed 42
+```
+
+Ground truth is generated **first**, and the data is derived from it — never inferred
+afterwards. Generation is a pure function of `(seed, split, difficulty, order_count)`, so the
+same command twice produces byte-identical files and anyone can reproduce every number.
+
+| Split | Orders | Purpose |
+|---|---|---|
+| `dev` | 60 | fast iteration; meets the challenge's 50+ bar |
+| `train` | 400 | fits the score blender |
+| `calibration` | 200 | fits isotonic calibration and selects thresholds — never evaluated on |
+| `test` | 300 | every published number comes from here |
+| `scale` | 5,000 | throughput benchmark (~1.5 s to generate) |
+
+Eleven anomaly classes are injected at controlled prevalence, with a `--difficulty
+{easy,standard,hard}` dial that changes *how much* goes wrong without changing *what* goes
+wrong. Money conservation is enforced as a property test: the bank credits reconcile to the
+declared settlement nets exactly, modulo the deltas each anomaly explicitly declares.
+
+A committed 60-order fixture set lives in `data/fixtures/dev-standard-42/`.
 
 See [PLAN.md](PLAN.md) for the full project plan and [ARCHITECTURE.md](ARCHITECTURE.md) for the
 data model and the definitions the evaluation depends on.
