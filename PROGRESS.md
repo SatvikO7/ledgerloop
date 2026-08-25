@@ -222,7 +222,7 @@ These are settled. Do not re-litigate them; `ARCHITECTURE.md` has the full reaso
 |---|---|
 | Local repo | initialised, branch `main`, working tree clean |
 | Commits | `8eb6f91` Step 0 · `a7042fa` Step 1 · `46f4117`/`fb8f568` handoff · Step 2 |
-| Tracked files | 66 |
+| Tracked files | 67 |
 | Remote | `origin` → `https://github.com/SatvikO7/ledgerloop.git` (**private**) |
 | Pushed | all three commits; `main` tracks `origin/main` |
 
