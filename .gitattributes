@@ -1,0 +1,9 @@
+# Normalise line endings in the repository; check out native on Windows.
+* text=auto
+
+*.py   text diff=python
+*.md   text
+*.toml text
+*.json text
+*.csv  text
+Makefile text eol=lf
