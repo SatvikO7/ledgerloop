@@ -63,3 +63,22 @@ Every step from here ends with all of:
 - `mypy` clean (strict on `models`, `config`, `money`)
 - Private step documentation written to `.local/steps/step-NN-*.md` (never committed)
 - Implementation committed and pushed
+
+> **Push is currently blocked** — no git remote is configured yet. Steps 0 and 1 are
+> committed locally and will be pushed together once the GitHub repository exists.
+> See `PROGRESS.md` for the exact unblocking command.
+
+---
+
+## Progress notes
+
+Execution has matched the planned order with no reordering or skipped work. Two
+within-step additions are worth recording, both already reflected in
+`ARCHITECTURE.md`:
+
+- **Step 0** added a `train` split (400 orders) that PLAN.md did not have. The score
+  blender is a fitted model, so it needs its own fitting data — otherwise the isotonic
+  calibrator sees in-sample scores.
+- **Step 1** added `GeneratorConfig.ensure_class_coverage`, an opt-in pass that
+  guarantees one effect per anomaly class. It **distorts prevalence** and is therefore
+  used *only* for the committed fixture set, never for `train` / `calibration` / `test`.
