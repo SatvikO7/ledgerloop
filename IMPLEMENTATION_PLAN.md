@@ -38,7 +38,7 @@ Settled before implementation; reasoning in `ARCHITECTURE.md` §5.
 |---|---|---|
 | 0 | **Contracts** — money module, Pydantic models, link-level truth schema, config, deferred interfaces, and the written definition of the evaluation unit | ✅ Complete |
 | 1 | **Generator + ground truth + property tests** — 11 anomaly classes, 5 splits, seeded byte-identical regeneration, money conservation | ✅ Complete |
-| 2 | **Eval harness — before any matcher exists** — `metrics.py`, `report.py`, and B0 (exact-join) as the first "system" | ⬜ |
+| 2 | **Eval harness — before any matcher exists** — `metrics.py`, `report.py`, and B0 (exact-join) as the first "system" | ✅ Complete |
 | 3 | **Ingest + normalize** — three parsers, canonical schema, regex narration, DD/MM resolution | ⬜ |
 | 4 | **T0 + T1** — exact key and tolerance. *First defensible number.* | ⬜ |
 | 5 | **T2 aggregation solver** — bucketing, settlement anchoring, meet-in-the-middle DP, greedy fallback, 200 ms cap, uniqueness check → `AMBIGUOUS_AGGREGATION` | ⬜ |
@@ -81,3 +81,21 @@ within-step additions are worth recording, both already reflected in
 - **Step 1** added `GeneratorConfig.ensure_class_coverage`, an opt-in pass that
   guarantees one effect per anomaly class. It **distorts prevalence** and is therefore
   used *only* for the committed fixture set, never for `train` / `calibration` / `test`.
+- **Step 2** added `eval/truth_io.py`, which was not in the plan: the report is scored
+  against ground truth read back off disk rather than against the generator's return
+  value, so `EVALUATION.md` and the committed CSVs cannot quietly disagree.
+
+  It also turned up a real gap. `GroundTruthLink.anomaly_class` is never populated by
+  the generator — every emitted link carries the default `A01_CLEAN` — so a per-class
+  recall table grouped on that field shows one all-clean row and hides the other ten
+  classes. The evaluator now attributes each link through its endpoint *records*
+  instead. Fixed in the evaluator rather than the generator: the endpoint rule also
+  handles links broken in two ways, which a single link label cannot represent, and
+  changing Step 1 would have rewritten the committed fixture for no gain.
+
+**The first measured number.** B0 on `test` at seed 42, generator `0.2.0`:
+precision **0.5909** (95% CI [0.5371, 0.6426]), recall 0.6633, match rate 0.6580,
+195 correct against 135 false positives costing **₹34,98,306**. Per-class recall is
+0.00 for `A07_MISSING_REFERENCE` and 0.60 for `A09_SPLIT_PAYOUT`, and 1.00 for the
+classes that leave the reference intact. The exact join fails exactly where the plan
+predicted it would, which is what makes it a usable floor rather than a strawman.

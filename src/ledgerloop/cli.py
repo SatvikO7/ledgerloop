@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-``argparse`` rather than a CLI framework: one command today, and a dependency
+``argparse`` rather than a CLI framework: two commands today, and a dependency
 that exists only to make ``--help`` prettier is not worth carrying into a
 project whose selling point is that it runs on nothing.
 """
@@ -13,6 +13,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ledgerloop.config import SPLIT_SIZES, GeneratorConfig
+from ledgerloop.eval.baselines import run_b0
+from ledgerloop.eval.metrics import evaluate
+from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
+from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.generator import generate_to_disk
 from ledgerloop.models.enums import Difficulty, SplitName
 from ledgerloop.money import format_minor
@@ -61,6 +65,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="force one effect per anomaly class after the draw; distorts prevalence, "
         "intended only for the committed fixture set",
     )
+
+    evaluation = subparsers.add_parser(
+        "eval", help="score the baselines against a dataset's ground truth"
+    )
+    evaluation.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="a generated dataset directory (as written by `ledgerloop generate`)",
+    )
+    evaluation.add_argument(
+        "--out",
+        type=Path,
+        default=Path("EVALUATION.md"),
+        help="report destination. Regenerated in full every run and gitignored, "
+        "because a committed report is one that can be quietly corrected.",
+    )
     return parser
 
 
@@ -102,6 +123,43 @@ def _run_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_eval(args: argparse.Namespace) -> int:
+    directory: Path = args.data
+    if not directory.is_dir():
+        print(f"no such dataset directory: {directory}", file=sys.stderr)
+        return 1
+
+    manifest = load_manifest(directory)
+    truth = load_ground_truth(directory)
+
+    baseline = run_b0(directory)
+    metrics = evaluate(
+        baseline.predictions,
+        truth,
+        run_id=f"{baseline.name.lower()}-{manifest.split.value}-{manifest.seed}",
+        wall_clock_ms=baseline.wall_clock_ms,
+    )
+
+    scored = EvaluatedRun(baseline=baseline, metrics=metrics)
+    write_report(args.out, render_report([scored], manifest=manifest, truth=truth))
+
+    links = metrics.link_metrics
+    assert links is not None  # evaluate() always populates it
+    print(f"evaluated {directory} ({manifest.split.value}, seed {manifest.seed})")
+    print(
+        f"  {baseline.name}: precision {metrics.auto_match_precision:.4f} "
+        f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] · "
+        f"recall {links.recall:.4f} · match rate {metrics.match_rate:.4f}"
+    )
+    print(
+        f"  {links.true_positives} correct · {links.false_positives} false positives "
+        f"costing {format_minor(links.false_positive_cost_minor)} · "
+        f"{links.false_negatives} missed"
+    )
+    print(f"  wrote {args.out}")
+    return 0
+
+
 def _force_utf8_output() -> None:
     """Print rupee symbols on a Windows console without crashing.
 
@@ -121,6 +179,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "generate":
         return _run_generate(args)
+    if args.command == "eval":
+        return _run_eval(args)
     raise AssertionError(f"unhandled command {args.command!r}")  # pragma: no cover
 
 

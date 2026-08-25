@@ -1,6 +1,6 @@
 # PROGRESS.md — session handoff
 
-**Last updated:** 2026-08-25 · **Branch:** `main` · **HEAD:** `a7042fa`
+**Last updated:** 2026-08-25 · **Branch:** `main` · **HEAD:** Step 2
 
 Read this first, then [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for the build
 order and [ARCHITECTURE.md](ARCHITECTURE.md) for the decisions that are already settled.
@@ -11,15 +11,23 @@ every divergence from it is recorded in `ARCHITECTURE.md` §6.
 
 ## 1. Current status
 
-**Step 1 of 14 complete.** The project has a tested type layer and a working, seeded
-synthetic data generator with link-level ground truth. **No matching, ingest, or
-evaluation logic exists yet** — that starts at Step 2.
+**Step 2 of 14 complete.** The project has a tested type layer, a seeded synthetic data
+generator with link-level ground truth, and **a working scoreboard with a real number on
+it**. B0 (exact join on UTR) is the only system scored so far. **No ingest and no
+matching tier exists yet** — that starts at Step 3.
 
 Everything runs offline with one runtime dependency (`pydantic`). No LLM calls, no
-Docker, no external services have been introduced.
+Docker, no external services have been introduced. Step 2 added no dependency.
 
 ```
-324 tests passing · 99% coverage · ruff clean · mypy --strict clean (28 files)
+433 tests passing · 99% coverage · ruff clean · mypy --strict clean (33 files)
+```
+
+**The floor to beat**, B0 on `test`, seed 42, generator `0.2.0`:
+
+```
+precision 0.5909  [0.5371, 0.6426]   recall 0.6633   match rate 0.6580
+195 correct · 135 false positives costing ₹34,98,306.00 · 99 missed
 ```
 
 ---
@@ -49,21 +57,31 @@ Docker, no external services have been introduced.
 - Committed fixture: `data/fixtures/dev-standard-42/` — 60 orders, 5 settlements,
   23 bank rows, 59 evaluation links, 13 unmatchable, 13 anomalies applied.
 
+### Step 2 — Eval harness + B0
+
+- `eval/truth_io.py` — reads `GroundTruth` and the manifest back off disk, the exact
+  inverse of the emitters. The report is scored against the *files*, so it can never
+  disagree with the committed CSVs.
+- `eval/metrics.py` — link-level P/R/F1 with a **Wilson** interval on precision, match
+  rate, per-class recall, money view, and `evaluate()` producing a `RunMetrics`.
+- `eval/baselines.py` — B0, exact join on UTR, with its own deliberately naive readers.
+- `eval/report.py` — renders `EVALUATION.md`; gitignored and fully regenerated.
+- `ledgerloop eval --data <dir>` and a `make eval` target that regenerates `test` first.
+
 ---
 
 ## 3. What has NOT been completed
 
-**Steps 2–14 — nothing in this list exists yet:**
+**Steps 3–14 — nothing in this list exists yet:**
 
 | Missing | Step |
 |---|---|
-| Eval harness (`metrics.py`, `report.py`), B0 baseline | 2 |
 | Ingest / normalize — the three parsers, narration regex, DD/MM resolution | 3 |
 | Any matching tier (T0–T5) | 4–6, 9 |
 | Score blender, isotonic calibration, threshold selection, decision policy | 7 |
 | Exception classifier, root causes, bounded auto-resolution | 8 |
 | LLM client, response cache, `--no-llm` | 9 |
-| Baselines B1/B2, ablation table, multi-seed sweep, `EVALUATION.md` | 10 |
+| Baselines B1/B2/B3, ablation table, multi-seed sweep | 10 |
 | LangGraph assembly, audit replay | 11 |
 | Streamlit UI | 12 |
 | `make demo`, Docker Compose, DEMO.md, video | 13 |
@@ -76,12 +94,12 @@ Docker, no external services have been introduced.
 
 ## 4. Current implementation step
 
-**Completed: Step 1.**
-**Next: Step 2 — "Eval harness, before any matcher exists."**
+**Completed: Step 2.**
+**Next: Step 3 — "Ingest + normalize."**
 
-Step 2 is deliberately ordered before any matching logic: building the scoreboard first
-means no later change is ever a guess about whether it helped. B0 (exact-join) is ~20
-lines and immediately produces a real number.
+The scoreboard now exists and has a number on it, which was the whole point of ordering
+Step 2 before any matcher: no change from here is a guess about whether it helped. The
+moment T0 exists it gets scored against the same truth B0 was scored on.
 
 ---
 
@@ -95,6 +113,7 @@ models/      __init__ base enums refs records truth candidates
              decisions recon_exception metrics audit
 generator/   __init__ vocab world baseline scenarios ground_truth
              emitters generate
+eval/        __init__ truth_io metrics baselines report
 graph/       __init__ interface        (Protocol only — no implementation)
 vector/      __init__ interface        (Protocol only — no implementation)
 ```
@@ -105,7 +124,10 @@ vector/      __init__ interface        (Protocol only — no implementation)
 unit/      test_money  test_models  test_truth  test_config  test_metrics
            test_state_and_interfaces  test_generator  test_emitters
            test_generator_edges
+           test_eval_metrics  test_eval_truth_io  test_eval_baselines
+           test_eval_report
 property/  test_money_invariants  test_generator_invariants
+           test_metrics_invariants
 ```
 
 ### Docs / config
@@ -121,6 +143,7 @@ data/fixtures/dev-standard-42/  (6 committed files)
 ```
 .local/steps/step-00-foundation.md
 .local/steps/step-01-data-generation.md
+.local/steps/step-02-eval-harness.md
 ```
 
 Detailed per-step write-ups. `.local/` is gitignored. **Write one for every step.**
@@ -151,24 +174,29 @@ These are settled. Do not re-litigate them; `ARCHITECTURE.md` has the full reaso
 | 16 | **Money conservation is checkable, not rhetorical:** every scenario that moves money declares `bank_delta_minor`, so `sum(settlement-linked credits) − sum(declared nets) − sum(declared deltas) == 0` exactly. |
 | 17 | **The split name is mixed into the RNG seed.** `Random(f"{seed}:{split}:baseline")`. |
 | 18 | **`ReconState` lives at `ledgerloop.state`, not `models.state`** — it holds a `RunConfig`, and putting it in `models` creates a real import cycle. |
+| 19 | **Per-class recall is attributed through the link's endpoint *records*, not `GroundTruthLink.anomaly_class`** — the generator never populates that field, so grouping on it hides ten of the eleven classes. A link is counted under every anomaly touching either endpoint, so **the rows overlap and do not sum to the link total.** |
+| 20 | **The precision interval is Wilson, not the normal approximation** — at 250/250 the normal approximation returns `[1.0, 1.0]`, breaking exactly where this project's headline claim lives. The two boundary cases are special-cased to exact 0.0 / 1.0 because floating point lands them a few ulps short. |
+| 21 | **A zero denominator is reported as `n/a`, never as `0.00%`** — and the interval widens to `[0.0, 1.0]` rather than narrowing. A system that predicted nothing has not achieved perfect precision. |
+| 22 | **Match rate measures reach, precision measures correctness** — `match_rate` counts records the system asserted *anything* about, and its denominator is `reconcilable_refs` restricted to payment and bank records. Folding correctness in would double-count precision; including orders and settlements would charge the matcher for edges the sources assert. |
+| 23 | **B0 is a stdlib join, not `pandas.merge`** — the semantics PLAN.md §9.2 asks for are the exact join, not the library, and a runtime dependency for a twenty-line lookup contradicts the "runs on nothing" claim. |
 
 ---
 
 ## 7. Tests
 
 ```bash
-.venv/Scripts/python.exe -m pytest                                   # 324 passed in ~4.4s
+.venv/Scripts/python.exe -m pytest                                   # 433 passed in ~29s
 .venv/Scripts/python.exe -m pytest --cov=ledgerloop --cov-report=term-missing
 .venv/Scripts/python.exe -m ruff check .                             # All checks passed!
-.venv/Scripts/python.exe -m mypy                                     # 28 files, clean
+.venv/Scripts/python.exe -m mypy                                     # 33 files, clean
 ```
 
 | Metric | Result |
 |---|---|
-| Tests | **324 passed**, 0 failed |
-| Coverage | **99%** (1434 stmts, 6 miss; 232 branch, 6 partial) |
+| Tests | **433 passed**, 0 failed |
+| Coverage | **99%** (1805 stmts, 6 miss; 290 branch, 6 partial); `eval/` at **100%** |
 | `ruff check .` | clean |
-| `mypy` (strict) | clean, 28 source files |
+| `mypy` (strict) | clean, 33 source files |
 
 **Step 1 acceptance criteria — all met:**
 
@@ -177,6 +205,15 @@ These are settled. Do not re-litigate them; `ARCHITECTURE.md` has the full reaso
 - All 11 anomaly classes present in the fixture and in `test`.
 - Realised prevalence within **±2%** of configured, measured on 2,000 draws.
 
+**Step 2 acceptance criteria — all met:**
+
+- Metric correctness pinned on hand-built truth sets small enough to verify by eye.
+- CI edge cases covered: zero predictions, zero truth, both, and a flawless run.
+- Ground truth round-trips through the emitted files exactly, including `note is None`.
+- B0 produces a plausible non-trivial number on `test` and fails where predicted:
+  `A07_MISSING_REFERENCE` recall 0.00, `A09_SPLIT_PAYOUT` 0.60.
+- `EVALUATION.md` is deterministic apart from the two labelled measured-timing rows.
+
 ---
 
 ## 8. Git / GitHub status
@@ -184,13 +221,14 @@ These are settled. Do not re-litigate them; `ARCHITECTURE.md` has the full reaso
 | | |
 |---|---|
 | Local repo | initialised, branch `main`, working tree clean |
-| Commits | `8eb6f91` Step 0 · `a7042fa` Step 1 · `46f4117` handoff |
-| Tracked files | 57 |
+| Commits | `8eb6f91` Step 0 · `a7042fa` Step 1 · `46f4117`/`fb8f568` handoff · Step 2 |
+| Tracked files | 66 |
 | Remote | `origin` → `https://github.com/SatvikO7/ledgerloop.git` (**private**) |
 | Pushed | all three commits; `main` tracks `origin/main` |
 
 Excluded from the repo and verified: `.local/`, `.claude/`, `.venv/`, `data/generated/`,
-`.hypothesis/`, `.env`, caches. No secret-shaped files are tracked.
+`.hypothesis/`, `.env`, `EVALUATION.md`, `reports/`, caches. No secret-shaped files are
+tracked.
 
 ---
 
@@ -210,23 +248,29 @@ no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
 
 ## 10. Exact next action
 
-1. **Begin Step 2 — the eval harness**, in this order:
-   - `src/ledgerloop/eval/metrics.py` — link-level precision / recall / F1 against
-     `GroundTruth.evaluation_pairs`, with a **confidence interval** on precision
-     (`LinkMetrics.precision_ci_low/high` already exist). Match rate denominator is
-     `GroundTruth.reconcilable_refs` — `UNMATCHABLE` records are excluded and reported
-     separately as the honest ceiling.
-   - `src/ledgerloop/eval/baselines.py` — **B0 only**: a `pandas`/stdlib exact-join on
-     UTR. This is the "why not just SQL" answer and the harness's first real input.
-   - `src/ledgerloop/eval/report.py` — writes `EVALUATION.md` (gitignored; regenerated,
-     never hand-typed).
-   - Wire `ledgerloop eval` into `cli.py`; add a `make eval` target.
-   - Tests: metric correctness on hand-built tiny truth sets, the CI-bound edge cases
-     (zero predictions, zero truth), and B0 producing a plausible non-trivial number on
-     the fixture.
-2. Write `.local/steps/step-02-eval-harness.md`, commit, push.
+1. **Begin Step 3 — ingest + normalize.** Three parsers producing the canonical records
+   that already exist in `models/records.py`:
+   - `src/ledgerloop/ingest/ledger.py` — `ledger_orders.csv` → `CanonicalOrder`. The
+     easy one; do it first to settle the reader's shape.
+   - `src/ledgerloop/ingest/psp.py` — `psp_settlements.json` → `CanonicalSettlement` +
+     `CanonicalPayment`. Must populate `order_ref_normalized` from `order_ref_raw`,
+     recovering the three deliberate corruptions (null, space-separated, and the
+     `chr(0x2011)` non-breaking hyphen) and leaving `None` when it cannot.
+   - `src/ledgerloop/ingest/bank.py` — `bank_statement.csv` → `CanonicalBankTxn`, with
+     the **regex-first** narration extraction filling `extracted_utr` /
+     `extracted_merchant`, and `DD/MM/YYYY` resolution. Both stay `None` under A07.
+   - Every record keeps its `RawRecord` provenance — the audit trail has to be able to
+     show a controller the original line, not just the system's reading of it.
+   - Reject `Currency.USD` with a clear message (`Currency.USD.supported is False`),
+     so the A11 cut is testable rather than merely absent.
+2. Write `.local/steps/step-03-ingest.md`, commit, push.
 
-**Do not** start ingest or any matching tier before the harness produces a number.
+**Do not** build a matching tier in Step 3. T0 is Step 4, and it gets scored the moment
+it exists — `ledgerloop eval` is already waiting for it.
+
+**Reuse, do not rebuild:** the naive readers in `eval/baselines.py` are B0's own and
+must stay naive. A baseline sharing the system's normalisation measures the system
+twice.
 
 ---
 
@@ -245,6 +289,16 @@ no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
 - **Trailing one-payment batches** were 1:1 joins that inflated tier yields. Folded away.
 - `MinorUnits` briefly serialised to a JSON string, which broke round-tripping. It
   serialises as `int`.
+- **`GroundTruthLink.anomaly_class` is never populated by the generator** — every
+  emitted link carries the default `A01_CLEAN`. The first per-class recall table
+  rendered exactly one row (`A01_CLEAN | 100%`) with all ten other classes silently
+  missing, which is the precise failure PLAN.md §9.1 asks that table to prevent, and it
+  looked entirely plausible. Fixed in the evaluator, not the generator: see decision 19.
+  **Do not "fix" this in `ground_truth.py`** — a single link label cannot represent a
+  link broken in two ways, and relabelling would rewrite the committed fixture's bytes
+  for no measurement gain.
+- The Wilson upper bound at 250/250 evaluates to `0.9999999999999998`. The two boundary
+  cases are pinned to exact 0.0 / 1.0 rather than left to round.
 
 ### Environment quirks (Windows)
 
@@ -284,3 +338,21 @@ no Groq / Google AI Studio keys obtained yet — not needed until Step 9.
   why T0 cannot reach 100% on clean money.
 - Regenerate the fixture with `make fixtures` if the generator changes; it is committed
   and a diff will show up.
+
+### Eval-harness gotchas
+
+- `EVALUATION.md` is **not** byte-identical between runs: wall clock and throughput are
+  measured. They are confined to a `#### Measured timings` block, and the determinism
+  test filters exactly those two lines. Anything else that varies is a bug.
+- **A05 `DUPLICATE_CREDIT` never appears in the per-class recall table**, correctly: the
+  duplicate bank row has no truth link by construction, so it cannot be recalled. Its
+  damage shows up in precision, as false positives.
+- `run_b0` asserts each payment's **gross** amount. It has no fee model and no
+  allocation, so its reconciled-rupee figure runs above the truth even where its links
+  are right. That is part of what the baseline demonstrates — leave it.
+- Tests reach the committed fixture via `Path(__file__).resolve().parents[2]`, not a
+  relative path, so the suite passes from any working directory.
+- The `scored` fixture in `test_eval_baselines.py` is **module-scoped**. A class-scoped
+  fixture defined as an instance method is deprecated in pytest 8 and warns.
+- `make eval` regenerates the `test` split before scoring, so a report can never be
+  produced against stale data.
