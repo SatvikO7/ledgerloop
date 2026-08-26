@@ -179,7 +179,9 @@ class TestLadderDisciplineAcrossTheCorpus:
         _, _, run = _matched(split, difficulty, seed)
         by_tier: dict[Tier, set[str]] = {Tier.T0_EXACT: set(), Tier.T1_TOLERANCE: set()}
         for candidate in run.candidates:
-            if candidate.link_type is LinkType.SETTLEMENT_CREDITED_AS:
+            if candidate.link_type is not LinkType.SETTLEMENT_CREDITED_AS:
+                continue
+            if candidate.tier in by_tier:
                 by_tier[candidate.tier].add(candidate.source_ref.key)
         assert by_tier[Tier.T0_EXACT] & by_tier[Tier.T1_TOLERANCE] == set()
 

@@ -237,7 +237,7 @@ class TestTheSystemAndBaselineTogether:
         code = main(["eval", "--data", str(data), "--out", str(tmp_path / "out.md")])
         printed = capsys.readouterr().out
         assert code == 0
-        assert "T0+T1:" in printed
+        assert "T0+T1+T2:" in printed
         assert "B0:" in printed
 
     def test_it_reports_decisions_and_settlement_dispositions(self, tmp_path, capsys):

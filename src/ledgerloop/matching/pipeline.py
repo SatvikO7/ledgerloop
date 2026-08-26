@@ -51,6 +51,7 @@ from ledgerloop.matching.context import MatchContext
 from ledgerloop.matching.policy import decide_all
 from ledgerloop.matching.tier0_exact import OrderLegOutcome, run_tier0
 from ledgerloop.matching.tier1_tolerance import run_tier1
+from ledgerloop.matching.tier2_aggregation import AggregationOutcome, run_tier2
 from ledgerloop.models.candidates import MatchCandidate
 from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, LinkType, Tier
@@ -59,12 +60,18 @@ from ledgerloop.state import ReconState
 
 __all__ = ["MATCHER_DESCRIPTION", "MATCHER_NAME", "MatchRun", "run_matching"]
 
-MATCHER_NAME = "T0+T1"
-MATCHER_DESCRIPTION = "Exact key, then tolerance (LedgerLoop deterministic tiers)"
+MATCHER_NAME = "T0+T1+T2"
+MATCHER_DESCRIPTION = (
+    "Exact key, tolerance, then aggregation (LedgerLoop deterministic tiers)"
+)
 
-#: The tiers this step implements. T2-T5 are later steps and are absent rather
+#: The tiers this step implements. T3-T5 are later steps and are absent rather
 #: than present-and-empty, so the report cannot show a zero for an unbuilt tier.
-IMPLEMENTED_TIERS: tuple[Tier, ...] = (Tier.T0_EXACT, Tier.T1_TOLERANCE)
+IMPLEMENTED_TIERS: tuple[Tier, ...] = (
+    Tier.T0_EXACT,
+    Tier.T1_TOLERANCE,
+    Tier.T2_AGGREGATION,
+)
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,7 @@ class MatchRun:
 
     order_leg: OrderLegOutcome
     bank_legs: tuple[BankLegOutcome, ...] = field(default=())
+    aggregation: AggregationOutcome = field(default_factory=AggregationOutcome)
 
     credits_seen: int = 0
     credits_with_utr: int = 0
@@ -98,7 +106,10 @@ class MatchRun:
 
     @property
     def credits_joined(self) -> int:
-        return sum(leg.resolved_credits for leg in self.bank_legs)
+        return (
+            sum(leg.resolved_credits for leg in self.bank_legs)
+            + self.aggregation.credits_matched
+        )
 
     @property
     def settlements_joined(self) -> int:
@@ -142,6 +153,7 @@ class MatchRun:
 def _tier_contributions(
     outcomes: tuple[BankLegOutcome, ...],
     order_leg: OrderLegOutcome,
+    aggregation: AggregationOutcome,
     decisions: tuple[MatchDecision, ...],
     elapsed_by_tier: dict[Tier, int],
 ) -> tuple[TierContribution, ...]:
@@ -153,6 +165,10 @@ def _tier_contributions(
     an auto-match no earlier tier could have made, so marginal equals total.
     That equality is a property of the pool, not a shortcut, and it stops
     holding at T4, whose re-run loop can revisit earlier tiers' residue.
+
+    T2 depends on it twice over: it only ever sees settlements T0 and T1 left
+    *undecided*, and the splits it exists for are exactly the ones they declined
+    to consume.
     """
     proposed: dict[Tier, int] = dict.fromkeys(IMPLEMENTED_TIERS, 0)
     matched: dict[Tier, int] = dict.fromkeys(IMPLEMENTED_TIERS, 0)
@@ -160,6 +176,7 @@ def _tier_contributions(
     proposed[Tier.T0_EXACT] += len(order_leg.candidates)
     for outcome in outcomes:
         proposed[outcome.tier] += len(outcome.candidates)
+    proposed[Tier.T2_AGGREGATION] += len(aggregation.candidates)
     for decision in decisions:
         if decision.outcome is DecisionOutcome.AUTO_MATCHED:
             matched[decision.tier] += 1
@@ -224,11 +241,16 @@ def run_matching(
     t1_bank = run_tier1(context, config.tolerances)
     t1_ms = (time.perf_counter_ns() - t1_started) // 1_000_000
 
+    t2_started = time.perf_counter_ns()
+    aggregation = run_tier2(context, config.tolerances)
+    t2_ms = (time.perf_counter_ns() - t2_started) // 1_000_000
+
     bank_legs = (t0_bank, t1_bank)
     candidates: list[MatchCandidate] = [
         *order_leg.candidates,
         *t0_bank.candidates,
         *t1_bank.candidates,
+        *aggregation.candidates,
     ]
     decisions = decide_all(candidates, config.thresholds, decided_at=stamp)
 
@@ -247,17 +269,28 @@ def run_matching(
         state=state,
         predictions=_predictions(decisions, by_id),
         tier_contributions=_tier_contributions(
-            bank_legs, order_leg, decisions, {Tier.T0_EXACT: t0_ms, Tier.T1_TOLERANCE: t1_ms}
+            bank_legs,
+            order_leg,
+            aggregation,
+            decisions,
+            {
+                Tier.T0_EXACT: t0_ms,
+                Tier.T1_TOLERANCE: t1_ms,
+                Tier.T2_AGGREGATION: t2_ms,
+            },
         ),
         wall_clock_ms=int(elapsed_ms),
         order_leg=order_leg,
         bank_legs=bank_legs,
+        aggregation=aggregation,
         credits_seen=len(context.credits),
         credits_with_utr=context.credits_with_utr,
         settlements_seen=len(context.settlements),
         settlements_with_utr=context.settlements_with_utr,
-        settlements_resolved=sum(leg.resolved_settlements for leg in bank_legs),
-        settlements_contested=sum(leg.contested_settlements for leg in bank_legs),
+        settlements_resolved=sum(leg.resolved_settlements for leg in bank_legs)
+        + aggregation.settlements_resolved,
+        settlements_contested=sum(leg.contested_settlements for leg in bank_legs)
+        + aggregation.settlements_ambiguous,
         settlements_unresolved=len(context.settlements)
-        - sum(leg.resolved_settlements + leg.contested_settlements for leg in bank_legs),
+        - len(context.consumed_settlements),
     )

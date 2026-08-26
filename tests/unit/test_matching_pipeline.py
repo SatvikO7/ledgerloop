@@ -145,9 +145,18 @@ class TestWhatBecomesAPrediction:
 class TestCandidateYieldVersusConviction:
     def test_the_two_are_reported_separately(self, clean_run):
         rows = {row.tier: row for row in clean_run.tier_contributions}
-        assert set(rows) == {Tier.T0_EXACT, Tier.T1_TOLERANCE}
+        assert set(rows) == {Tier.T0_EXACT, Tier.T1_TOLERANCE, Tier.T2_AGGREGATION}
         assert rows[Tier.T0_EXACT].candidates_proposed == 5  # 2 orders + 1 settlement + 2 payments
         assert rows[Tier.T0_EXACT].auto_matched == 5
+
+    def test_a_tier_with_nothing_to_do_reports_zero_rather_than_vanishing(self, clean_run):
+        """T0 took the whole batch, so T2 saw an empty pool. Zero is the measurement.
+
+        Distinct from an *unbuilt* tier, which is absent from the table entirely.
+        """
+        rows = {row.tier: row for row in clean_run.tier_contributions}
+        assert rows[Tier.T2_AGGREGATION].candidates_proposed == 0
+        assert rows[Tier.T2_AGGREGATION].auto_matched == 0
 
     def test_yield_exceeds_auto_matches_when_the_policy_declines(self):
         only = batch()
@@ -175,6 +184,7 @@ class TestCandidateYieldVersusConviction:
         assert {row.tier for row in clean_run.tier_contributions} == {
             Tier.T0_EXACT,
             Tier.T1_TOLERANCE,
+            Tier.T2_AGGREGATION,
         }
 
     def test_evaluable_candidates_counts_only_the_scored_link_type(self, clean_run):
@@ -309,7 +319,7 @@ class TestAgainstTheRealCorpus:
 
     def test_the_tier_contributions_are_populated(self, fixture_scored):
         _, _, metrics = fixture_scored
-        assert len(metrics.tier_contributions) == 2
+        assert len(metrics.tier_contributions) == 3
         assert sum(row.candidates_proposed for row in metrics.tier_contributions) > 0
 
     def test_running_twice_gives_the_same_predictions(self, fixture_scored):
