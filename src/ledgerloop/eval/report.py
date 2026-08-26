@@ -26,19 +26,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
-from ledgerloop.eval.baselines import BaselineRun
-from ledgerloop.eval.metrics import evaluation_links_by_class
+from ledgerloop.eval.metrics import PredictedLink, evaluation_links_by_class
 from ledgerloop.eval.truth_io import DatasetManifest
 from ledgerloop.models.metrics import RunMetrics
 from ledgerloop.models.truth import GroundTruth
 from ledgerloop.money import format_minor
 
-__all__ = ["PENDING_BASELINES", "EvaluatedRun", "render_report", "write_report"]
+__all__ = ["PENDING_BASELINES", "EvaluatedRun", "ScoredRun", "render_report", "write_report"]
 
 #: Baselines PLAN.md §9.2 specifies that no implemented step produces yet.
 #: Listed so the table shows the shape of the finished comparison rather than
-#: implying B0 is the whole story.
+#: implying what is built so far is the whole story.
 PENDING_BASELINES: tuple[tuple[str, str, str], ...] = (
     ("B1", "Exact + fuzzy -- the typical hackathon submission", "Step 6"),
     ("B2", "LLM-only, run on the 60-record dev split", "Step 10"),
@@ -48,11 +48,59 @@ PENDING_BASELINES: tuple[tuple[str, str, str], ...] = (
 _PENDING = "_pending_"
 
 
+class ScoredRun(Protocol):
+    """What the report needs from anything it scores.
+
+    Both :class:`~ledgerloop.eval.baselines.BaselineRun` and
+    :class:`~ledgerloop.matching.pipeline.MatchRun` satisfy this, which is the
+    point: the report renders a baseline and the real system through the same
+    code path, so the comparison cannot be flattered by rendering one of them
+    more generously than the other.
+
+    Every member is declared read-only, so a dataclass field and a computed
+    property both satisfy it -- B0 counts its joins as it goes while the matcher
+    derives them from the tier outcomes, and neither has to reshape itself.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def description(self) -> str: ...
+
+    @property
+    def predictions(self) -> tuple[PredictedLink, ...]: ...
+
+    @property
+    def wall_clock_ms(self) -> int: ...
+
+    @property
+    def credits_seen(self) -> int: ...
+
+    @property
+    def credits_with_utr(self) -> int: ...
+
+    @property
+    def credits_without_utr(self) -> int: ...
+
+    @property
+    def credits_joined(self) -> int: ...
+
+    @property
+    def settlements_seen(self) -> int: ...
+
+    @property
+    def settlements_joined(self) -> int: ...
+
+    @property
+    def settlements_unjoined(self) -> int: ...
+
+
 @dataclass(frozen=True)
 class EvaluatedRun:
     """One system's predictions, already scored."""
 
-    baseline: BaselineRun
+    system: ScoredRun
     metrics: RunMetrics
 
 
@@ -110,7 +158,7 @@ def _headline(run: EvaluatedRun) -> list[str]:
     )
 
     return [
-        f"## {run.baseline.name} -- {run.baseline.description}",
+        f"## {run.system.name} -- {run.system.description}",
         "",
         "### The headline three (PLAN.md §9.1)",
         "",
@@ -204,21 +252,21 @@ def _class_recall_table(run: EvaluatedRun, truth: GroundTruth) -> list[str]:
 
 
 def _diagnostics(run: EvaluatedRun) -> list[str]:
-    baseline = run.baseline
+    system = run.system
     return [
         "### Why it scores the way it does",
         "",
         "| | |",
         "|---|---|",
-        f"| Bank credits read | {baseline.credits_seen} |",
-        f"| ...carrying a recoverable UTR | {baseline.credits_with_utr} |",
+        f"| Bank credits read | {system.credits_seen} |",
+        f"| ...carrying a recoverable UTR | {system.credits_with_utr} |",
         f"| ...with no UTR (A07, plus the unrelated noise rows) | "
-        f"{baseline.credits_without_utr} |",
-        f"| ...joined to a settlement | {baseline.credits_joined} |",
-        f"| Settlements read | {baseline.settlements_seen} |",
-        f"| ...reached by at least one credit | {baseline.settlements_joined} |",
-        f"| ...never joined | {baseline.settlements_unjoined} |",
-        f"| Links asserted | {len(baseline.predictions)} |",
+        f"{system.credits_without_utr} |",
+        f"| ...joined to a settlement | {system.credits_joined} |",
+        f"| Settlements read | {system.settlements_seen} |",
+        f"| ...reached by at least one credit | {system.settlements_joined} |",
+        f"| ...never joined | {system.settlements_unjoined} |",
+        f"| Links asserted | {len(system.predictions)} |",
         "",
         "#### Measured timings",
         "",
@@ -227,17 +275,66 @@ def _diagnostics(run: EvaluatedRun) -> list[str]:
         "",
         "| | |",
         "|---|---|",
-        f"| Wall clock | {baseline.wall_clock_ms} ms |",
+        f"| Wall clock | {system.wall_clock_ms} ms |",
         f"| Throughput | {run.metrics.records_per_second:,.0f} records/sec |",
         "",
     ]
 
 
-def _baseline_table(runs: Sequence[EvaluatedRun]) -> list[str]:
+def _tier_table(run: EvaluatedRun) -> list[str]:
+    """Candidate yield beside auto-matches. They are not the same number.
+
+    A tier that proposes a hundred candidates and auto-matches forty has not
+    performed like one that proposes forty and auto-matches forty: the gap is
+    the review queue a finance team has to staff. Reporting a single figure
+    would let an over-eager proposal stage hide behind a cautious policy, or a
+    cautious policy hide behind an eager proposer.
+
+    Tiers no implemented step produces are absent rather than shown at zero. A
+    zero for an unbuilt component is a false measurement.
+    """
+    rows = run.metrics.tier_contributions
+    if not rows:
+        return []
+
     lines = [
-        "## Baseline comparison (PLAN.md §9.2)",
+        "### Tier contribution",
         "",
-        "| # | Baseline | Precision | Match rate | FP cost |",
+        "| Tier | Candidates proposed | Auto-matched | Marginal | LLM calls | Wall clock |",
+        "|---|---|---|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{row.tier.name}` | {row.candidates_proposed} | {row.auto_matched} | "
+        f"{row.marginal_auto_matched} | {row.llm_calls} | {row.wall_clock_ms} ms |"
+        for row in rows
+    )
+    lines.extend(
+        [
+            "",
+            "`Marginal` is what the tier added over the ladder without it. Every tier here",
+            "sees only what the previous ones left in the pool, so marginal equals total by",
+            "construction -- an equality that stops holding at T4, whose re-run loop can",
+            "revisit earlier residue.",
+            "",
+            "Candidates include the structural `ORDER_PAID_BY` and intermediate",
+            "`SETTLEMENT_CREDITED_AS` edges, which are decided and audited but never scored:",
+            "`ARCHITECTURE.md` §2 restricts the metrics to `PAYMENT_CREDITED_AS`.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _comparison_table(runs: Sequence[EvaluatedRun]) -> list[str]:
+    lines = [
+        "## System and baseline comparison (PLAN.md §9.2)",
+        "",
+        "Precision and match rate are orthogonal by design. A row that trades match",
+        "rate for precision is making the trade this project argues for: in finance ops a",
+        "wrong auto-match costs far more than a human reviewing an extra item, and the",
+        "false-positive cost column is that argument in rupees.",
+        "",
+        "| # | System | Precision | Match rate | FP cost |",
         "|---|---|---|---|---|",
     ]
     for run in runs:
@@ -245,7 +342,7 @@ def _baseline_table(runs: Sequence[EvaluatedRun]) -> list[str]:
         predicted = (links.true_positives + links.false_positives) if links else 0
         cost = format_minor(links.false_positive_cost_minor) if links else "--"
         lines.append(
-            f"| {run.baseline.name} | {run.baseline.description} | "
+            f"| {run.system.name} | {run.system.description} | "
             f"{_ratio_cell(run.metrics.auto_match_precision, predicted)} | "
             f"{_pct(run.metrics.match_rate)} | {cost} |"
         )
@@ -266,10 +363,11 @@ def render_report(
 
     lines: list[str] = []
     lines.extend(_header(manifest, truth))
-    lines.extend(_baseline_table(runs))
+    lines.extend(_comparison_table(runs))
     for run in runs:
         lines.extend(_headline(run))
         lines.extend(_link_table(run))
+        lines.extend(_tier_table(run))
         lines.extend(_class_recall_table(run, truth))
         lines.extend(_money_table(run))
         lines.extend(_diagnostics(run))

@@ -48,7 +48,7 @@ from math import sqrt
 
 from ledgerloop.models.base import FrozenLedgerModel, MinorUnits
 from ledgerloop.models.enums import AnomalyClass, LinkType, RecordType
-from ledgerloop.models.metrics import LinkMetrics, RunMetrics
+from ledgerloop.models.metrics import LinkMetrics, RunMetrics, TierContribution
 from ledgerloop.models.refs import RecordRef
 from ledgerloop.models.truth import GroundTruth, TruthPair
 from ledgerloop.money import sum_minor
@@ -373,12 +373,18 @@ def evaluate(
     *,
     run_id: str,
     wall_clock_ms: int = 0,
+    tier_contributions: Sequence[TierContribution] = (),
 ) -> RunMetrics:
     """Score one system's predictions against one dataset's truth.
 
     The single entry point the report consumes. ``record_count`` is taken from
     the truth's verdict list, which has exactly one entry per record, so it
     cannot disagree with the denominators computed beside it.
+
+    ``tier_contributions`` is what each tier proposed and what survived the
+    decision policy. It defaults to empty because a baseline has no tiers, and
+    an empty tuple renders as an absent section rather than as a table of
+    zeros -- a zero for an unbuilt component is a false measurement.
     """
     pairs = [prediction.pair for prediction in predictions]
     truth_pairs = truth.evaluation_pairs
@@ -405,4 +411,5 @@ def evaluate(
         reconciled_minor=money.reconciled_minor,
         outstanding_minor=money.outstanding_minor,
         records_per_second=record_count / seconds if seconds > 0 else 0.0,
+        tier_contributions=tuple(tier_contributions),
     )

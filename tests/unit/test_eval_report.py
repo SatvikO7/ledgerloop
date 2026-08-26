@@ -39,7 +39,7 @@ def rendered():
         run_id="b0-dev-42",
         wall_clock_ms=baseline.wall_clock_ms,
     )
-    run = EvaluatedRun(baseline=baseline, metrics=metrics)
+    run = EvaluatedRun(system=baseline, metrics=metrics)
     return render_report([run], manifest=manifest, truth=truth), metrics
 
 
@@ -61,7 +61,7 @@ class TestDeterminism:
         again = render_report(
             [
                 EvaluatedRun(
-                    baseline=baseline,
+                    system=baseline,
                     metrics=evaluate(baseline.predictions, truth, run_id="b0-dev-42"),
                 )
             ],
@@ -116,7 +116,7 @@ class TestPendingIsNotZero:
         text = render_report(
             [
                 EvaluatedRun(
-                    baseline=empty,
+                    system=empty,
                     metrics=evaluate((), truth, run_id="empty"),
                 )
             ],
@@ -222,3 +222,63 @@ class TestEvalCommand:
         monkeypatch.chdir(tmp_path)
         assert main(["eval", "--data", str(data)]) == 0
         assert (tmp_path / "EVALUATION.md").is_file()
+
+
+class TestTheSystemAndBaselineTogether:
+    """`ledgerloop eval` scores the matcher and the floor it has to beat.
+
+    Both go through the same renderer, so the comparison cannot be flattered by
+    rendering one more generously than the other.
+    """
+
+    def test_the_command_reports_both_systems(self, tmp_path, capsys):
+        data = tmp_path / "data"
+        generate_to_disk(GeneratorConfig(split=SplitName.DEV, seed=42), data)
+        code = main(["eval", "--data", str(data), "--out", str(tmp_path / "out.md")])
+        printed = capsys.readouterr().out
+        assert code == 0
+        assert "T0+T1:" in printed
+        assert "B0:" in printed
+
+    def test_it_reports_decisions_and_settlement_dispositions(self, tmp_path, capsys):
+        data = tmp_path / "data"
+        generate_to_disk(GeneratorConfig(split=SplitName.DEV, seed=42), data)
+        main(["eval", "--data", str(data), "--out", str(tmp_path / "out.md")])
+        printed = capsys.readouterr().out
+        assert "auto-matched" in printed
+        assert "needs review" in printed
+        assert "contested" in printed
+
+    def test_the_report_carries_a_tier_contribution_table(self, tmp_path):
+        data = tmp_path / "data"
+        generate_to_disk(GeneratorConfig(split=SplitName.DEV, seed=42), data)
+        out = tmp_path / "out.md"
+        main(["eval", "--data", str(data), "--out", str(out)])
+        text = out.read_text(encoding="utf-8")
+        assert "### Tier contribution" in text
+        assert "`T0_EXACT`" in text
+        assert "`T1_TOLERANCE`" in text
+        assert "Candidates proposed" in text
+
+    def test_the_baseline_gets_no_tier_table(self, tmp_path):
+        """A baseline has no tiers, and an empty table of zeros would be a lie."""
+        data = tmp_path / "data"
+        generate_to_disk(GeneratorConfig(split=SplitName.DEV, seed=42), data)
+        out = tmp_path / "out.md"
+        main(["eval", "--data", str(data), "--out", str(out)])
+        text = out.read_text(encoding="utf-8")
+        assert text.count("### Tier contribution") == 1
+
+    def test_quarantined_source_records_are_surfaced(self, tmp_path, capsys):
+        data = tmp_path / "data"
+        generate_to_disk(GeneratorConfig(split=SplitName.DEV, seed=42), data)
+        ledger = data / "ledger_orders.csv"
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        parts = lines[1].split(",")
+        parts[3] = "not-a-number"
+        lines[1] = ",".join(parts)
+        ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        code = main(["eval", "--data", str(data), "--out", str(tmp_path / "out.md")])
+        assert code == 0
+        assert "malformed source records quarantined" in capsys.readouterr().err

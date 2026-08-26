@@ -12,13 +12,14 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from ledgerloop.config import SPLIT_SIZES, GeneratorConfig
+from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, RunConfig
 from ledgerloop.eval.baselines import run_b0
 from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
 from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.generator import generate_to_disk
 from ledgerloop.ingest import IngestError, ingest_dataset
+from ledgerloop.matching import run_matching
 from ledgerloop.models.enums import Difficulty, SplitName
 from ledgerloop.money import format_minor
 
@@ -196,31 +197,68 @@ def _run_eval(args: argparse.Namespace) -> int:
 
     manifest = load_manifest(directory)
     truth = load_ground_truth(directory)
+    tag = f"{manifest.split.value}-{manifest.seed}"
+
+    # The system first, then the floor it has to beat. Both are scored against
+    # the same truth read off the same files, so the comparison is exact.
+    ingested = ingest_dataset(directory, strict=False)
+    config = RunConfig(run_id=f"t0t1-{tag}", split=manifest.split, seed=manifest.seed)
+    matched = run_matching(ingested, config)
+    scored = [
+        EvaluatedRun(
+            system=matched,
+            metrics=evaluate(
+                matched.predictions,
+                truth,
+                run_id=config.run_id,
+                wall_clock_ms=matched.wall_clock_ms,
+                tier_contributions=matched.tier_contributions,
+            ),
+        )
+    ]
 
     baseline = run_b0(directory)
-    metrics = evaluate(
-        baseline.predictions,
-        truth,
-        run_id=f"{baseline.name.lower()}-{manifest.split.value}-{manifest.seed}",
-        wall_clock_ms=baseline.wall_clock_ms,
+    scored.append(
+        EvaluatedRun(
+            system=baseline,
+            metrics=evaluate(
+                baseline.predictions,
+                truth,
+                run_id=f"{baseline.name.lower()}-{tag}",
+                wall_clock_ms=baseline.wall_clock_ms,
+            ),
+        )
     )
 
-    scored = EvaluatedRun(baseline=baseline, metrics=metrics)
-    write_report(args.out, render_report([scored], manifest=manifest, truth=truth))
+    write_report(args.out, render_report(scored, manifest=manifest, truth=truth))
 
-    links = metrics.link_metrics
-    assert links is not None  # evaluate() always populates it
     print(f"evaluated {directory} ({manifest.split.value}, seed {manifest.seed})")
+    for run in scored:
+        links = run.metrics.link_metrics
+        assert links is not None  # evaluate() always populates it
+        print(
+            f"  {run.system.name}: precision {run.metrics.auto_match_precision:.4f} "
+            f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] · "
+            f"recall {links.recall:.4f} · match rate {run.metrics.match_rate:.4f}"
+        )
+        print(
+            f"      {links.true_positives} correct · {links.false_positives} false positives "
+            f"costing {format_minor(links.false_positive_cost_minor)} · "
+            f"{links.false_negatives} missed"
+        )
+
     print(
-        f"  {baseline.name}: precision {metrics.auto_match_precision:.4f} "
-        f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] · "
-        f"recall {links.recall:.4f} · match rate {metrics.match_rate:.4f}"
+        f"  decisions: {matched.auto_matched} auto-matched · {matched.needs_review} "
+        f"needs review · {matched.exceptions} exception "
+        f"(from {len(matched.candidates)} candidates)"
     )
     print(
-        f"  {links.true_positives} correct · {links.false_positives} false positives "
-        f"costing {format_minor(links.false_positive_cost_minor)} · "
-        f"{links.false_negatives} missed"
+        f"  settlements: {matched.settlements_resolved} resolved · "
+        f"{matched.settlements_contested} contested · "
+        f"{matched.settlements_unresolved} left for later tiers"
     )
+    if ingested.problems:
+        print(f"  {len(ingested.problems)} malformed source records quarantined", file=sys.stderr)
     print(f"  wrote {args.out}")
     return 0
 
