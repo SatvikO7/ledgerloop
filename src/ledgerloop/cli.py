@@ -1,6 +1,6 @@
 """Command-line entry point.
 
-``argparse`` rather than a CLI framework: two commands today, and a dependency
+``argparse`` rather than a CLI framework: three commands today, and a dependency
 that exists only to make ``--help`` prettier is not worth carrying into a
 project whose selling point is that it runs on nothing.
 """
@@ -18,6 +18,7 @@ from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
 from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.generator import generate_to_disk
+from ledgerloop.ingest import IngestError, ingest_dataset
 from ledgerloop.models.enums import Difficulty, SplitName
 from ledgerloop.money import format_minor
 
@@ -64,6 +65,27 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="force one effect per anomaly class after the draw; distorts prevalence, "
         "intended only for the committed fixture set",
+    )
+
+    ingest = subparsers.add_parser(
+        "ingest", help="parse and normalise a dataset's three sources, and report on them"
+    )
+    ingest.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="a generated dataset directory (as written by `ledgerloop generate`)",
+    )
+    ingest.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail on the first malformed record instead of quarantining it",
+    )
+    ingest.add_argument(
+        "--show-problems",
+        type=int,
+        default=10,
+        help="how many quarantined records to list (default 10)",
     )
 
     evaluation = subparsers.add_parser(
@@ -123,6 +145,49 @@ def _run_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ingest(args: argparse.Namespace) -> int:
+    directory: Path = args.data
+    if not directory.is_dir():
+        print(f"no such dataset directory: {directory}", file=sys.stderr)
+        return 1
+
+    try:
+        result = ingest_dataset(directory, strict=args.strict)
+    except IngestError as exc:
+        print(f"ingest failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"ingested {directory}")
+    print(
+        f"  {len(result.orders)} orders · {len(result.payments)} payments · "
+        f"{len(result.settlements)} settlements · {len(result.bank_txns)} bank rows "
+        f"({result.wall_clock_ms} ms)"
+    )
+    print(f"  dates: {result.date_order.basis}")
+    print(
+        f"  references: {result.payments_with_usable_ref} usable "
+        f"({result.payments_with_recovered_ref} recovered by normalisation), "
+        f"{result.payments_with_no_ref} absent at source"
+    )
+    print(
+        f"  narration: {result.credits_with_utr} of {len(result.credits)} credits carry a "
+        f"UTR, {result.credits_with_merchant} a merchant, "
+        f"{result.credits_with_no_reference} neither"
+    )
+
+    if not result.problems:
+        print("  0 malformed records ✓")
+        return 0
+
+    print(f"  {len(result.problems)} malformed records quarantined:", file=sys.stderr)
+    for problem in result.problems[: max(0, args.show_problems)]:
+        print(f"    {problem}", file=sys.stderr)
+    remaining = len(result.problems) - max(0, args.show_problems)
+    if remaining > 0:
+        print(f"    ... and {remaining} more", file=sys.stderr)
+    return 0
+
+
 def _run_eval(args: argparse.Namespace) -> int:
     directory: Path = args.data
     if not directory.is_dir():
@@ -179,6 +244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.command == "generate":
         return _run_generate(args)
+    if args.command == "ingest":
+        return _run_ingest(args)
     if args.command == "eval":
         return _run_eval(args)
     raise AssertionError(f"unhandled command {args.command!r}")  # pragma: no cover
