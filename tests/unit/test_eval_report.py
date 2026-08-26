@@ -103,7 +103,8 @@ class TestPendingIsNotZero:
         text, _ = rendered
         for name in ("B1", "B2", "B3"):
             assert f"| {name} |" in text
-        assert "_pending_ (Step 6)" in text
+        assert "_pending_ (Step 10)" in text
+        assert "_pending_ (Step 8)" in text
 
     def test_a_zero_denominator_renders_as_na_not_as_zero(self):
         """The single most common way an evaluation report misleads."""
@@ -237,7 +238,7 @@ class TestTheSystemAndBaselineTogether:
         code = main(["eval", "--data", str(data), "--out", str(tmp_path / "out.md")])
         printed = capsys.readouterr().out
         assert code == 0
-        assert "T0+T1+T2:" in printed
+        assert "T0-T4:" in printed
         assert "B0:" in printed
 
     def test_it_reports_decisions_and_settlement_dispositions(self, tmp_path, capsys):

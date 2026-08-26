@@ -32,7 +32,9 @@ __all__ = [
     "AutoResolutionBounds",
     "DecisionThresholds",
     "GeneratorConfig",
+    "GraphInference",
     "LLMConfig",
+    "LexicalMatching",
     "MatchingTolerances",
     "RunConfig",
     "prevalence_for",
@@ -61,6 +63,73 @@ class MatchingTolerances(FrozenLedgerModel):
     )
     subset_solver_timeout_ms: int = Field(
         default=200, ge=1, description="Hard per-credit cap (PLAN.md §6.2)."
+    )
+
+
+class LexicalMatching(FrozenLedgerModel):
+    """T3's similarity gates (PLAN.md 6.3).
+
+    T3 is the first tier that scores one string against another, so it is the
+    first that needs a *threshold* rather than an exact test. Both gates are
+    here rather than in the tier so a reported number cannot be separated from
+    the values that produced it -- they travel in ``RunConfig.config_hash``.
+    """
+
+    min_score: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Similarity a merchant name must reach before T3 will consider "
+        "the credit at all. High because the corpus's own abbreviations score in the "
+        "high nineties against their expansions once the consonant skeleton is taken "
+        "-- so a name that only reaches the eighties is a different merchant, not a "
+        "harder spelling of the same one.",
+    )
+    min_margin: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="How far the best candidate must beat the runner-up. Two merchants "
+        "the scorer cannot separate are an ambiguity, and picking the higher of two "
+        "indistinguishable scores is the coin flip every tier here refuses.",
+    )
+    date_window_days: int = Field(
+        default=7,
+        ge=0,
+        description="Credit-to-settlement date window for a lexical match. Wider than "
+        "T1's +/-3 because T3's residual is precisely the batches other anomalies have "
+        "already moved -- A04 shifts a credit two days and A12 shifts a settlement by up "
+        "to nine, and a window that excluded them would lose the links T3 exists for.",
+    )
+
+
+class GraphInference(FrozenLedgerModel):
+    """T4's constraint-propagation parameters (PLAN.md 6.4)."""
+
+    sibling_completion_threshold: float = Field(
+        default=0.80,
+        gt=0.0,
+        le=1.0,
+        description="Fraction of a settlement's payments that must already point at one "
+        "credit before the remainder are constrained to it. PLAN.md 6.4 names 80%.",
+    )
+    ring_min_events: int = Field(
+        default=3,
+        ge=1,
+        description="Refund events on one customer reference before it is worth a look.",
+    )
+    ring_min_merchants: int = Field(
+        default=2,
+        ge=1,
+        description="Distinct merchants those events must span. One merchant is a "
+        "difficult customer; several is a pattern.",
+    )
+    max_rerun_passes: int = Field(
+        default=4,
+        ge=1,
+        description="Cap on the T2/T3/T4 re-run loop. The loop stops early when a pass "
+        "changes nothing, so this only bounds a pathological case -- but an unbounded "
+        "loop in a reconciliation run is a hang, not a slow answer.",
     )
 
 
@@ -286,6 +355,8 @@ class RunConfig(FrozenLedgerModel):
     seed: int = Field(default=42, ge=0)
 
     tolerances: MatchingTolerances = Field(default_factory=MatchingTolerances)
+    lexical: LexicalMatching = Field(default_factory=LexicalMatching)
+    graph: GraphInference = Field(default_factory=GraphInference)
     thresholds: DecisionThresholds = Field(default_factory=DecisionThresholds)
     auto_resolution: AutoResolutionBounds = Field(default_factory=AutoResolutionBounds)
     llm: LLMConfig = Field(default_factory=LLMConfig)

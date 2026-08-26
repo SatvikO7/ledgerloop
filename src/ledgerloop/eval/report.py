@@ -40,7 +40,7 @@ __all__ = ["PENDING_BASELINES", "EvaluatedRun", "ScoredRun", "render_report", "w
 #: Listed so the table shows the shape of the finished comparison rather than
 #: implying what is built so far is the whole story.
 PENDING_BASELINES: tuple[tuple[str, str, str], ...] = (
-    ("B1", "Exact + fuzzy -- the typical hackathon submission", "Step 6"),
+    ("B1", "Exact + fuzzy -- the typical hackathon submission", "Step 10"),
     ("B2", "LLM-only, run on the 60-record dev split", "Step 10"),
     ("B3", "LedgerLoop, full ladder", "Step 8"),
 )

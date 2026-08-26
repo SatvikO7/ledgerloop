@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from ledgerloop.config import GeneratorConfig, MatchingTolerances, RunConfig
+from ledgerloop.config import (
+    GeneratorConfig,
+    GraphInference,
+    MatchingTolerances,
+    RunConfig,
+)
 from ledgerloop.eval.baselines import run_b0
 from ledgerloop.eval.metrics import confusion, evaluate
 from ledgerloop.eval.truth_io import load_ground_truth
@@ -22,7 +27,8 @@ from ledgerloop.generator import generate_to_disk
 from ledgerloop.ingest import ingest_dataset
 from ledgerloop.matching import MATCHER_NAME, run_matching
 from ledgerloop.models.enums import DecisionOutcome, LinkType, SourceName, SplitName, Tier
-from tests.unit.conftest import batch, corpus, noise_credit
+from ledgerloop.money import allocate_minor
+from tests.unit.conftest import bank_credit, batch, corpus, noise_credit
 
 WHEN = datetime(2026, 4, 1, 9, 0, 0)
 FIXTURE = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "dev-standard-42"
@@ -145,7 +151,13 @@ class TestWhatBecomesAPrediction:
 class TestCandidateYieldVersusConviction:
     def test_the_two_are_reported_separately(self, clean_run):
         rows = {row.tier: row for row in clean_run.tier_contributions}
-        assert set(rows) == {Tier.T0_EXACT, Tier.T1_TOLERANCE, Tier.T2_AGGREGATION}
+        assert set(rows) == {
+            Tier.T0_EXACT,
+            Tier.T1_TOLERANCE,
+            Tier.T2_AGGREGATION,
+            Tier.T3_FUZZY,
+            Tier.T4_GRAPH,
+        }
         assert rows[Tier.T0_EXACT].candidates_proposed == 5  # 2 orders + 1 settlement + 2 payments
         assert rows[Tier.T0_EXACT].auto_matched == 5
 
@@ -185,7 +197,10 @@ class TestCandidateYieldVersusConviction:
             Tier.T0_EXACT,
             Tier.T1_TOLERANCE,
             Tier.T2_AGGREGATION,
+            Tier.T3_FUZZY,
+            Tier.T4_GRAPH,
         }
+        assert Tier.T5_LLM not in {row.tier for row in clean_run.tier_contributions}
 
     def test_evaluable_candidates_counts_only_the_scored_link_type(self, clean_run):
         assert clean_run.evaluable_candidates == 2
@@ -319,7 +334,7 @@ class TestAgainstTheRealCorpus:
 
     def test_the_tier_contributions_are_populated(self, fixture_scored):
         _, _, metrics = fixture_scored
-        assert len(metrics.tier_contributions) == 3
+        assert len(metrics.tier_contributions) == 5
         assert sum(row.candidates_proposed for row in metrics.tier_contributions) > 0
 
     def test_running_twice_gives_the_same_predictions(self, fixture_scored):
@@ -358,14 +373,64 @@ class TestAgainstAGeneratedSplit:
         assert links.precision_ci_high == 1.0
         assert 0.9 < links.precision_ci_low < 1.0
 
-    def test_recall_is_reported_honestly_and_is_low(self, split_scored):
-        """T0/T1 reach only the keyed, unambiguous, whole-batch payouts.
+    def test_recall_is_reported_honestly_and_is_still_short_of_the_target(
+        self, split_scored
+    ):
+        """Five tiers reach well under half the links, and that is recorded.
 
-        The rest is A07 (T3), A09 (T2) and the contested duplicates. Recording
-        the low number here is the point -- a step that quietly optimised recall
-        would have to give up precision to do it.
+        What remains is the contested duplicates (A05) and the batches whose
+        spellings the lexical gate will not relate -- both refusals rather than
+        failures to look. A step that quietly optimised recall would have to
+        give up precision to do it, and the precision column says it did not.
         """
         _, _, metrics = split_scored
         links = metrics.link_metrics
         assert links is not None
-        assert 0.15 < links.recall < 0.35
+        assert 0.40 < links.recall < 0.60
+        assert links.precision == 1.0
+
+
+class TestTheResidualLoop:
+    """T2/T3/T4 repeat until a pass changes nothing, or the cap stops them."""
+
+    @staticmethod
+    def _split_corpus():
+        """A split payout, so the residual tiers actually produce something."""
+        only = batch(amounts=(60_000, 40_000, 25_000), fee_minor=2_500)
+        grosses = [p.amount_minor for p in only.payments]
+        parts = allocate_minor(only.net_minor, [grosses[0], grosses[1] + grosses[2]])
+        rows = [
+            bank_credit("BNK-00001", amount_minor=parts[0], utr=only.settlement.utr),
+            bank_credit("BNK-00002", amount_minor=parts[1], utr=only.settlement.utr),
+        ]
+        return corpus(batches=[only], bank_txns=rows)
+
+    def test_it_stops_after_one_pass_when_nothing_is_left_to_do(self, clean_run):
+        """T0 took the whole batch, so the first residual pass finds nothing."""
+        assert clean_run.passes == 1
+
+    def test_a_productive_pass_earns_another(self):
+        """T2 resolves the split in pass one, so the loop looks again."""
+        run = run_matching(self._split_corpus(), config(), decided_at=WHEN)
+        assert run.passes == 2
+        assert run.aggregation.settlements_resolved == 1
+
+    def test_the_cap_bounds_a_run_that_would_otherwise_look_again(self):
+        """An unbounded loop in a reconciliation run is a hang, not a slow answer."""
+        capped = run_matching(
+            self._split_corpus(),
+            config(graph=GraphInference(max_rerun_passes=1)),
+            decided_at=WHEN,
+        )
+        assert capped.passes == 1
+
+    def test_capping_the_loop_does_not_change_what_the_first_pass_found(self):
+        built = self._split_corpus()
+        full = run_matching(built, config(), decided_at=WHEN)
+        capped = run_matching(
+            built, config(graph=GraphInference(max_rerun_passes=1)), decided_at=WHEN
+        )
+        assert capped.predictions == full.predictions
+
+    def test_the_loop_reports_how_many_passes_it_used(self, clean_run):
+        assert 1 <= clean_run.passes <= clean_run.state.config.graph.max_rerun_passes

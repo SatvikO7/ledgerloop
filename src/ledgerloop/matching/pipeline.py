@@ -52,6 +52,8 @@ from ledgerloop.matching.policy import decide_all
 from ledgerloop.matching.tier0_exact import OrderLegOutcome, run_tier0
 from ledgerloop.matching.tier1_tolerance import run_tier1
 from ledgerloop.matching.tier2_aggregation import AggregationOutcome, run_tier2
+from ledgerloop.matching.tier3_lexical import LexicalOutcome, build_profiles, run_tier3
+from ledgerloop.matching.tier4_graph import GraphOutcome, run_tier4
 from ledgerloop.models.candidates import MatchCandidate
 from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, LinkType, Tier
@@ -60,17 +62,20 @@ from ledgerloop.state import ReconState
 
 __all__ = ["MATCHER_DESCRIPTION", "MATCHER_NAME", "MatchRun", "run_matching"]
 
-MATCHER_NAME = "T0+T1+T2"
+MATCHER_NAME = "T0-T4"
 MATCHER_DESCRIPTION = (
-    "Exact key, tolerance, then aggregation (LedgerLoop deterministic tiers)"
+    "Exact key, tolerance, aggregation, lexical, graph "
+    "(LedgerLoop deterministic tiers)"
 )
 
-#: The tiers this step implements. T3-T5 are later steps and are absent rather
-#: than present-and-empty, so the report cannot show a zero for an unbuilt tier.
+#: The tiers this step implements. T5 is a later step and is absent rather than
+#: present-and-empty, so the report cannot show a zero for an unbuilt tier.
 IMPLEMENTED_TIERS: tuple[Tier, ...] = (
     Tier.T0_EXACT,
     Tier.T1_TOLERANCE,
     Tier.T2_AGGREGATION,
+    Tier.T3_FUZZY,
+    Tier.T4_GRAPH,
 )
 
 
@@ -88,6 +93,9 @@ class MatchRun:
     order_leg: OrderLegOutcome
     bank_legs: tuple[BankLegOutcome, ...] = field(default=())
     aggregation: AggregationOutcome = field(default_factory=AggregationOutcome)
+    lexical: LexicalOutcome = field(default_factory=LexicalOutcome)
+    graph: GraphOutcome = field(default_factory=GraphOutcome)
+    passes: int = 1
 
     credits_seen: int = 0
     credits_with_utr: int = 0
@@ -109,6 +117,7 @@ class MatchRun:
         return (
             sum(leg.resolved_credits for leg in self.bank_legs)
             + self.aggregation.credits_matched
+            + self.lexical.credits_matched
         )
 
     @property
@@ -154,6 +163,8 @@ def _tier_contributions(
     outcomes: tuple[BankLegOutcome, ...],
     order_leg: OrderLegOutcome,
     aggregation: AggregationOutcome,
+    lexical: LexicalOutcome,
+    graph: GraphOutcome,
     decisions: tuple[MatchDecision, ...],
     elapsed_by_tier: dict[Tier, int],
 ) -> tuple[TierContribution, ...]:
@@ -177,6 +188,8 @@ def _tier_contributions(
     for outcome in outcomes:
         proposed[outcome.tier] += len(outcome.candidates)
     proposed[Tier.T2_AGGREGATION] += len(aggregation.candidates)
+    proposed[Tier.T3_FUZZY] += len(lexical.candidates)
+    proposed[Tier.T4_GRAPH] += len(graph.candidates)
     for decision in decisions:
         if decision.outcome is DecisionOutcome.AUTO_MATCHED:
             matched[decision.tier] += 1
@@ -215,6 +228,50 @@ def _predictions(
     return tuple(links)
 
 
+def _merge_aggregation(
+    left: AggregationOutcome, right: AggregationOutcome
+) -> AggregationOutcome:
+    """Accumulate two T2 passes. Counters add; candidates concatenate."""
+    return AggregationOutcome(
+        candidates=left.candidates + right.candidates,
+        settlements_seen=left.settlements_seen + right.settlements_seen,
+        settlements_resolved=left.settlements_resolved + right.settlements_resolved,
+        settlements_ambiguous=left.settlements_ambiguous + right.settlements_ambiguous,
+        settlements_unsolved=right.settlements_unsolved,
+        settlements_without_key=right.settlements_without_key,
+        credits_matched=left.credits_matched + right.credits_matched,
+        payments_matched=left.payments_matched + right.payments_matched,
+        subsets_examined=left.subsets_examined + right.subsets_examined,
+        greedy_fallbacks=left.greedy_fallbacks + right.greedy_fallbacks,
+        timeouts=left.timeouts + right.timeouts,
+    )
+
+
+def _merge_lexical(left: LexicalOutcome, right: LexicalOutcome) -> LexicalOutcome:
+    """Accumulate two T3 passes.
+
+    Totals add; the *residual* counts (unsolved, without-profile) are taken
+    from the last pass, because they describe what is still open rather than
+    what happened -- summing them would double-count a settlement that stayed
+    open across passes.
+    """
+    return LexicalOutcome(
+        candidates=left.candidates + right.candidates,
+        profiles_built=right.profiles_built,
+        profile_witnesses=right.profile_witnesses,
+        settlements_seen=left.settlements_seen + right.settlements_seen,
+        settlements_resolved=left.settlements_resolved + right.settlements_resolved,
+        settlements_ambiguous=left.settlements_ambiguous + right.settlements_ambiguous,
+        settlements_unsolved=right.settlements_unsolved,
+        settlements_without_profile=right.settlements_without_profile,
+        credits_matched=left.credits_matched + right.credits_matched,
+        payments_matched=left.payments_matched + right.payments_matched,
+        names_scored=left.names_scored + right.names_scored,
+        rejected_below_score=left.rejected_below_score + right.rejected_below_score,
+        rejected_on_margin=left.rejected_on_margin + right.rejected_on_margin,
+    )
+
+
 def run_matching(
     ingest: IngestResult,
     config: RunConfig,
@@ -241,16 +298,63 @@ def run_matching(
     t1_bank = run_tier1(context, config.tolerances)
     t1_ms = (time.perf_counter_ns() - t1_started) // 1_000_000
 
-    t2_started = time.perf_counter_ns()
-    aggregation = run_tier2(context, config.tolerances)
-    t2_ms = (time.perf_counter_ns() - t2_started) // 1_000_000
+    # The residual loop (PLAN.md 6.1). T0 and T1 are exact and run once --
+    # nothing a later tier does can unlock a key that was not there. T2, T3 and
+    # T4 each consume records the others may have been waiting on, so they
+    # repeat until a pass changes nothing or the configured cap is reached.
+    #
+    # The merchant master is built once: it is derived from the *references* in
+    # the statement, which no amount of matching alters.
+    profiles = build_profiles(context)
+    aggregation = AggregationOutcome()
+    lexical = LexicalOutcome()
+    graph = GraphOutcome()
+    residual: list[MatchCandidate] = []
+    t2_ms = t3_ms = t4_ms = 0
+    passes = 0
+
+    for _ in range(config.graph.max_rerun_passes):
+        passes += 1
+        before = len(residual)
+
+        started = time.perf_counter_ns()
+        pass_aggregation = run_tier2(context, config.tolerances)
+        t2_ms += (time.perf_counter_ns() - started) // 1_000_000
+
+        started = time.perf_counter_ns()
+        pass_lexical = run_tier3(
+            context, config.tolerances, config.lexical, profiles=profiles
+        )
+        t3_ms += (time.perf_counter_ns() - started) // 1_000_000
+
+        established = (
+            *order_leg.candidates,
+            *t0_bank.candidates,
+            *t1_bank.candidates,
+            *residual,
+            *pass_aggregation.candidates,
+            *pass_lexical.candidates,
+        )
+        started = time.perf_counter_ns()
+        pass_graph = run_tier4(context, established, config.graph, config.thresholds)
+        t4_ms += (time.perf_counter_ns() - started) // 1_000_000
+
+        residual.extend(pass_aggregation.candidates)
+        residual.extend(pass_lexical.candidates)
+        residual.extend(pass_graph.candidates)
+        aggregation = _merge_aggregation(aggregation, pass_aggregation)
+        lexical = _merge_lexical(lexical, pass_lexical)
+        graph = pass_graph
+
+        if len(residual) == before:
+            break
 
     bank_legs = (t0_bank, t1_bank)
     candidates: list[MatchCandidate] = [
         *order_leg.candidates,
         *t0_bank.candidates,
         *t1_bank.candidates,
-        *aggregation.candidates,
+        *residual,
     ]
     decisions = decide_all(candidates, config.thresholds, decided_at=stamp)
 
@@ -272,25 +376,34 @@ def run_matching(
             bank_legs,
             order_leg,
             aggregation,
+            lexical,
+            graph,
             decisions,
             {
                 Tier.T0_EXACT: t0_ms,
                 Tier.T1_TOLERANCE: t1_ms,
                 Tier.T2_AGGREGATION: t2_ms,
+                Tier.T3_FUZZY: t3_ms,
+                Tier.T4_GRAPH: t4_ms,
             },
         ),
         wall_clock_ms=int(elapsed_ms),
         order_leg=order_leg,
         bank_legs=bank_legs,
         aggregation=aggregation,
+        lexical=lexical,
+        graph=graph,
+        passes=passes,
         credits_seen=len(context.credits),
         credits_with_utr=context.credits_with_utr,
         settlements_seen=len(context.settlements),
         settlements_with_utr=context.settlements_with_utr,
         settlements_resolved=sum(leg.resolved_settlements for leg in bank_legs)
-        + aggregation.settlements_resolved,
+        + aggregation.settlements_resolved
+        + lexical.settlements_resolved,
         settlements_contested=sum(leg.contested_settlements for leg in bank_legs)
-        + aggregation.settlements_ambiguous,
+        + aggregation.settlements_ambiguous
+        + lexical.settlements_ambiguous,
         settlements_unresolved=len(context.settlements)
         - len(context.consumed_settlements),
     )

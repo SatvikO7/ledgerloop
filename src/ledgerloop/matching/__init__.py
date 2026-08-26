@@ -1,12 +1,15 @@
 """The tier ladder. Cheapest and most certain first.
 
-Three tiers today -- T0 exact key, T1 tolerance, T2 aggregation -- sharing one
-residual pool. T0 and T1 share a resolver; T2 has its own, because the question
-it asks is different in kind: not "is this credit this payout?" but "which
-payments travelled in this tranche?". T3 fuzzy, T4 graph and T5 LLM
-adjudication are later steps, and are absent rather than stubbed: a tier that
-exists and returns nothing would show as a zero in the contribution table, and a
-zero for an unbuilt component is a false measurement.
+Five tiers -- T0 exact key, T1 tolerance, T2 aggregation, T3 lexical, T4 graph
+-- sharing one residual pool. T0 and T1 share a resolver; T2, T3 and T4 each
+have their own, because they ask different questions: which payments composed
+this tranche, which credit is this payout when the reference is gone, and what
+follows from what is already known. T2/T3/T4 repeat in a bounded loop until a
+pass changes nothing.
+
+T5 LLM adjudication is a later step and is absent rather than stubbed: a tier
+that exists and returns nothing would show as a zero in the contribution table,
+and a zero for an unbuilt component is a false measurement.
 
 Read :mod:`ledgerloop.matching.pipeline` first; the rest is the machinery it
 composes.
@@ -49,6 +52,20 @@ from ledgerloop.matching.tier2_aggregation import (
     payment_bucket,
     run_tier2,
 )
+from ledgerloop.matching.tier3_lexical import (
+    LexicalOutcome,
+    MerchantProfile,
+    build_profiles,
+    run_tier3,
+    score_names,
+)
+from ledgerloop.matching.tier4_graph import (
+    GraphOutcome,
+    RingFinding,
+    build_graph,
+    detect_rings,
+    run_tier4,
+)
 
 __all__ = [
     "MATCHER_DESCRIPTION",
@@ -58,18 +75,25 @@ __all__ = [
     "Assignment",
     "BankLegOutcome",
     "BankLegRule",
+    "GraphOutcome",
+    "LexicalOutcome",
     "MatchContext",
     "MatchRun",
+    "MerchantProfile",
     "OrderLegOutcome",
+    "RingFinding",
     "SettlementView",
     "SubsetSearch",
     "SubsetSolution",
     "allocated_share_minor",
+    "build_graph",
+    "build_profiles",
     "candidate_id",
     "credit_bucket",
     "decide",
     "decide_all",
     "decision_id",
+    "detect_rings",
     "expected_credit_minor",
     "find_subsets",
     "greedy_subset",
@@ -83,4 +107,7 @@ __all__ = [
     "run_tier0",
     "run_tier1",
     "run_tier2",
+    "run_tier3",
+    "run_tier4",
+    "score_names",
 ]

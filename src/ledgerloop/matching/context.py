@@ -210,6 +210,27 @@ class MatchContext:
         self.consumed_settlements.add(settlement_id)
         self.consumed_credits.update(credit_ids)
 
+    def merchant_of(self, view: SettlementView) -> str | None:
+        """The merchant a settlement belongs to, via its payments' orders.
+
+        ``CanonicalSettlement`` carries no ``merchant_id`` -- the PSP publishes
+        one but it is not part of the reconciliation contract, and inventing a
+        field for it would put a source's convenience into the model layer. The
+        identity is reachable anyway: payment -> order -> merchant, which is the
+        chain T0's order leg already verifies.
+
+        ``None`` when the payments disagree or none resolves to a known order.
+        A settlement spanning two merchants is not something to guess about --
+        it is either a corrupt reference or a corpus this code has not seen.
+        """
+        found = {
+            self.orders_by_id[payment.order_ref_normalized].merchant_id
+            for payment in view.payments
+            if payment.order_ref_normalized is not None
+            and payment.order_ref_normalized in self.orders_by_id
+        }
+        return found.pop() if len(found) == 1 else None
+
     # -- diagnostics the report explains the score with -------------------
 
     @property

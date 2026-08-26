@@ -7,12 +7,19 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
     "pydantic>=2.9",
+    "rapidfuzz>=3.9",
 ]
 
-# Step 0 deliberately depends on pydantic alone. Matching, eval and UI
-# dependencies (polars, rapidfuzz, scikit-learn, streamlit) are added by the
-# step that first needs them, so the money/contract layer stays installable
-# and testable with no heavy transitive tree.
+# Dependencies are added by the step that first needs them, so the
+# money/contract layer stays installable and testable with no heavy transitive
+# tree. Steps 0-5 needed pydantic alone; `rapidfuzz` arrives with T3, which is
+# the first tier that has to score one string against another (PLAN.md 6.3).
+#
+# NetworkX is deliberately NOT here. PLAN.md 6.4 names it for T4, but the four
+# constraint rules are adjacency lookups over a few hundred nodes, and
+# `graph/memory_repo.py` implements them behind `graph/interface.py` in about
+# as many lines as the import would cost. The Protocol is what keeps a
+# NetworkX or Neo4j backend a drop-in rather than a rewrite.
 
 [project.optional-dependencies]
 dev = [

@@ -64,15 +64,17 @@ def make_order(
     amount_minor: int = 100_000,
     line: int = 0,
     merchant_id: str = "MRCH_0001",
+    customer_ref: str = "CUST_10001",
+    status: OrderStatus = OrderStatus.CAPTURED,
 ) -> CanonicalOrder:
     return CanonicalOrder(
         raw=_raw(SourceName.LEDGER, line),
         order_id=order_id,
         merchant_id=merchant_id,
-        customer_ref="CUST_10001",
+        customer_ref=customer_ref,
         amount_minor=amount_minor,
         booked_at=BOOKED_AT,
-        status=OrderStatus.CAPTURED,
+        status=status,
     )
 
 
@@ -118,11 +120,20 @@ class Batch:
         settled_on: date = SETTLED_ON,
         order_refs: tuple[str | None, ...] | None = None,
         first_index: int = 1,
+        merchant_id: str = "MRCH_0001",
+        customer_refs: tuple[str, ...] | None = None,
     ) -> None:
         gross = sum(amounts)
+        self.merchant_id = merchant_id
         self.orders = tuple(
             make_order(
-                f"ORD-2026-{first_index + i:06d}", amount_minor=amount, line=first_index + i
+                f"ORD-2026-{first_index + i:06d}",
+                amount_minor=amount,
+                line=first_index + i,
+                merchant_id=merchant_id,
+                customer_ref=(
+                    customer_refs[i] if customer_refs is not None else f"CUST_{10001 + i}"
+                ),
             )
             for i, amount in enumerate(amounts)
         )

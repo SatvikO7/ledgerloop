@@ -1,0 +1,578 @@
+"""T3 -- lexical. Finding the payout when the reference is gone.
+
+Anomaly A07 ``MISSING_REFERENCE`` strips the UTR out of a bank narration and
+leaves only a merchant-name variant. Every keyed tier is blind to it: T0 and T1
+join on the reference, and T2 needs the settlement's key on two credits before
+it will look at a split. On the `test` split that is nine settlements and
+**99 links, ₹21.9 lakh** -- by a wide margin the largest bucket left, and the
+class PLAN.md §6.3 exists to close.
+
+WHAT T3 CAN ACTUALLY MATCH ON
+------------------------------
+Not what it looks like. The bank writes ``RZRPAY SFTWR P L``; the ledger writes
+``MRCH_0001``. **No source file maps one to the other** -- there is no merchant
+master among the three inputs, and the strings share no characters. So the
+comparison T3 needs does not exist until it is built.
+
+It is built from the corpus's own evidence. Every credit that *does* carry a
+UTR names a settlement, and that settlement's payments name orders, and those
+orders name a merchant. So a keyed credit is a labelled example: *this* spelling
+belongs to *that* merchant id. Collect them and the system has a merchant master
+it derived rather than was given -- a profile per merchant of the spellings the
+bank has actually used for it.
+
+The profile is learned from the **reference**, not from our own matches. That
+matters: a profile bootstrapped off T0/T1/T2's output would compound any error
+they made, and would make T3's reach depend on how well earlier tiers happened
+to do. The reference is the source's own assertion, so the profile is evidence
+even where the match was declined.
+
+THE THREE GATES
+---------------
+A name alone is not a match -- one merchant has many payouts. All three must
+hold:
+
+1. **Amount**, within T1's band. The credit is the whole net, so this is the
+   same test T1 applies, and it is what separates one payout from the next.
+2. **Date**, within :attr:`~ledgerloop.config.LexicalMatching.date_window_days`.
+   Wider than T1's ±3 on purpose: T3's residual is precisely the batches other
+   anomalies have already moved.
+3. **Name**, at or above ``min_score``, and beating the runner-up by
+   ``min_margin``.
+
+WHY THE CANDIDATE MUST BE UNREFERENCED
+---------------------------------------
+T3 only considers credits whose ``extracted_utr`` is ``None``. A credit that
+carries a reference is already explained by whatever that reference names --
+its amount agreeing with some other settlement is a coincidence, and matching
+it on a name would be overruling the bank's own statement of where the money
+went. This is the same rule Step 4's rival check applies, for the same reason.
+
+THE PROBABILITY
+---------------
+``p = score / n`` -- the similarity, divided uniformly among candidates the
+scorer could not separate. At an exact skeleton match with one candidate this
+is 1.0 and the configured ``tau_high`` auto-matches it; a name that only
+resembles routes to review, and a two-way tie lands below ``tau_low`` and
+becomes an exception. Same convention as every tier before it, and no new
+constant.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from rapidfuzz import fuzz
+
+from ledgerloop.config import LexicalMatching, MatchingTolerances
+from ledgerloop.ingest.normalize import merchant_skeleton, normalize_merchant_name
+from ledgerloop.matching.bank_leg import attribute_clawback, candidate_id
+from ledgerloop.matching.context import MatchContext, SettlementView
+from ledgerloop.models.candidates import Evidence, FeatureVector, MatchCandidate
+from ledgerloop.models.enums import EvidenceKind, LinkType, Tier
+from ledgerloop.models.records import CanonicalBankTxn
+from ledgerloop.models.refs import bank_ref, payment_ref, settlement_ref
+from ledgerloop.money import (
+    allocate_minor,
+    delta_ratio,
+    format_minor,
+    sum_minor,
+    tolerance_minor,
+    within_tolerance,
+)
+
+__all__ = [
+    "LexicalOutcome",
+    "MerchantProfile",
+    "NameMatch",
+    "build_profiles",
+    "run_tier3",
+    "score_names",
+]
+
+
+@dataclass(frozen=True)
+class MerchantProfile:
+    """The spellings a bank has been seen to use for one merchant."""
+
+    merchant_id: str
+    spellings: tuple[str, ...]
+    skeletons: tuple[str, ...]
+    witnesses: int
+
+    def __bool__(self) -> bool:
+        return bool(self.skeletons)
+
+
+@dataclass(frozen=True)
+class NameMatch:
+    """One credit scored against one merchant's profile."""
+
+    credit: CanonicalBankTxn
+    score: float
+    matched_spelling: str
+
+
+@dataclass(frozen=True)
+class LexicalOutcome:
+    """What one T3 pass produced."""
+
+    candidates: tuple[MatchCandidate, ...] = ()
+    profiles_built: int = 0
+    profile_witnesses: int = 0
+    settlements_seen: int = 0
+    settlements_resolved: int = 0
+    settlements_ambiguous: int = 0
+    settlements_unsolved: int = 0
+    settlements_without_profile: int = 0
+    credits_matched: int = 0
+    payments_matched: int = 0
+    names_scored: int = 0
+    rejected_below_score: int = 0
+    rejected_on_margin: int = 0
+
+    @property
+    def tier(self) -> Tier:
+        return Tier.T3_FUZZY
+
+    @property
+    def settlement_links(self) -> int:
+        return sum(
+            1 for c in self.candidates if c.link_type is LinkType.SETTLEMENT_CREDITED_AS
+        )
+
+    @property
+    def payment_links(self) -> int:
+        return sum(1 for c in self.candidates if c.is_evaluable)
+
+
+def score_names(left: str, right: str) -> float:
+    """Similarity of two merchant spellings, in ``[0, 1]``.
+
+    Two scorers, and the better of the two wins:
+
+    * **Consonant skeletons**, compared with ``fuzz.ratio``. This is the one
+      that does the work. ``generator/vocab.py`` argues that embeddings cannot
+      relate ``RZRPAY SFTWR P L`` to ``Razorpay Software Private Limited``;
+      Step 3's :func:`~ledgerloop.ingest.normalize.merchant_skeleton` maps both
+      to ``RZRPYSFTWR``, and eight of the twelve merchants collapse exactly.
+    * **Normalised names**, compared with ``fuzz.token_set_ratio`` -- PLAN.md
+      §6.3's scorer, and the one that survives a reordered or truncated name
+      where the skeleton has been shortened by a whole missing word
+      (``TECH`` for ``TECHNOLOGIES``).
+
+    Taking the maximum rather than a weighted blend keeps the score
+    interpretable: it is "how alike are these on the best available reading",
+    and a blend would need weights nothing here can justify.
+    """
+    skeleton = fuzz.ratio(merchant_skeleton(left), merchant_skeleton(right))
+    tokens = fuzz.token_set_ratio(normalize_merchant_name(left), normalize_merchant_name(right))
+    return max(skeleton, tokens) / 100.0
+
+
+def build_profiles(context: MatchContext) -> dict[str, MerchantProfile]:
+    """Derive a merchant master from the credits that carry a reference.
+
+    Each keyed credit is a labelled example: its UTR names a settlement, the
+    settlement's payments name orders, and those orders name a merchant. So the
+    spelling on that narration is attributable without any tier having matched
+    anything.
+
+    Built over **every** credit with a resolvable key, consumed or not -- the
+    evidence is the reference, and a settlement being already matched does not
+    make its narration less informative.
+    """
+    spellings: dict[str, list[str]] = {}
+    for txn in context.bank_txns:
+        if not txn.is_credit or txn.extracted_utr is None or txn.extracted_merchant is None:
+            continue
+        for view in context.settlements_by_utr.get(txn.extracted_utr, ()):
+            merchant = context.merchant_of(view)
+            if merchant is None:
+                continue
+            seen = spellings.setdefault(merchant, [])
+            if txn.extracted_merchant not in seen:
+                seen.append(txn.extracted_merchant)
+
+    return {
+        merchant: MerchantProfile(
+            merchant_id=merchant,
+            spellings=tuple(names),
+            skeletons=tuple(merchant_skeleton(name) for name in names),
+            witnesses=len(names),
+        )
+        for merchant, names in sorted(spellings.items())
+    }
+
+
+def _best_names(
+    view: SettlementView,
+    profile: MerchantProfile,
+    credits: tuple[CanonicalBankTxn, ...],
+    lexical: LexicalMatching,
+) -> tuple[list[NameMatch], int, int]:
+    """Score every candidate credit against the profile, keeping those that pass."""
+    scored: list[NameMatch] = []
+    below = 0
+    for txn in credits:
+        assert txn.extracted_merchant is not None  # filtered by the caller
+        best = 0.0
+        best_spelling = profile.spellings[0]
+        for spelling in profile.spellings:
+            score = score_names(txn.extracted_merchant, spelling)
+            if score > best:
+                best, best_spelling = score, spelling
+        if best < lexical.min_score:
+            below += 1
+            continue
+        scored.append(NameMatch(credit=txn, score=best, matched_spelling=best_spelling))
+
+    # Descending score, then txn_id: a total order, so the run is reproducible
+    # and the runner-up is always the same credit.
+    scored.sort(key=lambda match: (-match.score, match.credit.txn_id))
+    del view
+    return scored, len(credits), below
+
+
+def _candidate_credits(
+    view: SettlementView, context: MatchContext, tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+) -> tuple[CanonicalBankTxn, ...]:
+    """Unreferenced credits that could be this settlement's payout on money alone."""
+    band = tolerance_minor(
+        view.net_minor,
+        floor_minor=tolerances.amount_floor_minor,
+        bps=tolerances.amount_bps,
+    )
+    picked: list[CanonicalBankTxn] = []
+    for txn in context.open_credits():
+        if txn.extracted_utr is not None or txn.extracted_merchant is None:
+            continue
+        if not within_tolerance(txn.credit_minor, view.net_minor, band):
+            continue
+        gap = (txn.value_date - view.settlement.settled_on).days
+        if abs(gap) > lexical.date_window_days:
+            continue
+        picked.append(txn)
+    return tuple(picked)
+
+
+def _features(
+    view: SettlementView, match: NameMatch, tolerances: MatchingTolerances
+) -> FeatureVector:
+    delta = match.credit.credit_minor - view.net_minor
+    return FeatureVector(
+        tier=Tier.T3_FUZZY,
+        amount_delta_minor=delta,
+        tolerance_band_minor=tolerance_minor(
+            view.net_minor,
+            floor_minor=tolerances.amount_floor_minor,
+            bps=tolerances.amount_bps,
+        ),
+        amount_delta_ratio=delta_ratio(delta, view.net_minor),
+        date_delta_days=(match.credit.value_date - view.settlement.settled_on).days,
+        lexical_score=match.score,
+        # semantic_score stays 0.0: ChromaDB is cut, and the semantic path is
+        # scheduled as an ablation row rather than a dependency.
+    )
+
+
+def _evidence(
+    view: SettlementView,
+    match: NameMatch,
+    profile: MerchantProfile,
+    tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+    runner_up: NameMatch | None,
+) -> tuple[Evidence, ...]:
+    band = tolerance_minor(
+        view.net_minor,
+        floor_minor=tolerances.amount_floor_minor,
+        bps=tolerances.amount_bps,
+    )
+    gap = (match.credit.value_date - view.settlement.settled_on).days
+    items = [
+        Evidence(
+            kind=EvidenceKind.LEXICAL_SIMILARITY,
+            detail=(
+                f"{match.credit.txn_id} names {match.credit.extracted_merchant!r}, which "
+                f"scores {match.score:.3f} against {match.matched_spelling!r} -- a "
+                f"spelling the bank used for {profile.merchant_id} on a credit that did "
+                f"carry a reference ({profile.witnesses} spelling(s) on file)"
+            ),
+            refs=(settlement_ref(view.settlement_id), bank_ref(match.credit.txn_id)),
+            score=match.score,
+        ),
+        Evidence(
+            kind=EvidenceKind.NEGATIVE_EVIDENCE,
+            detail=(
+                f"{match.credit.txn_id} carries no reference of its own, so nothing else "
+                "in the statement claims it; the narration lost its UTR (A07) and the "
+                "merchant name is all that survived"
+            ),
+            refs=(bank_ref(match.credit.txn_id),),
+        ),
+        Evidence(
+            kind=EvidenceKind.AMOUNT_MATCH,
+            detail=(
+                f"credit {format_minor(match.credit.credit_minor)} matches the net "
+                f"declared by {view.settlement_id} within {format_minor(band)}"
+            ),
+            refs=(settlement_ref(view.settlement_id), bank_ref(match.credit.txn_id)),
+            amount_minor=match.credit.credit_minor,
+        ),
+        Evidence(
+            kind=EvidenceKind.DATE_PROXIMITY,
+            detail=(
+                f"credited {gap:+d} day(s) from the "
+                f"{view.settlement.settled_on.isoformat()} settlement date, inside the "
+                f"+/-{lexical.date_window_days} day window"
+            ),
+            refs=(settlement_ref(view.settlement_id), bank_ref(match.credit.txn_id)),
+        ),
+    ]
+    if runner_up is not None:
+        items.append(
+            Evidence(
+                kind=EvidenceKind.NEGATIVE_EVIDENCE,
+                detail=(
+                    f"the closest rival was {runner_up.credit.txn_id} at "
+                    f"{runner_up.score:.3f}, beaten by "
+                    f"{match.score - runner_up.score:.3f} against a required margin of "
+                    f"{lexical.min_margin:.3f}"
+                ),
+                refs=(bank_ref(runner_up.credit.txn_id),),
+                score=runner_up.score,
+            )
+        )
+    return tuple(items)
+
+
+def _ambiguity_evidence(
+    view: SettlementView, best: NameMatch, runner_up: NameMatch, lexical: LexicalMatching
+) -> Evidence:
+    return Evidence(
+        kind=EvidenceKind.NEGATIVE_EVIDENCE,
+        detail=(
+            f"{best.credit.txn_id} ({best.score:.3f}) and {runner_up.credit.txn_id} "
+            f"({runner_up.score:.3f}) both match {view.settlement_id} on name, amount "
+            f"and date, and are {best.score - runner_up.score:.3f} apart against a "
+            f"required margin of {lexical.min_margin:.3f}; the name cannot separate them"
+        ),
+        refs=(
+            settlement_ref(view.settlement_id),
+            bank_ref(best.credit.txn_id),
+            bank_ref(runner_up.credit.txn_id),
+        ),
+        amount_minor=best.credit.credit_minor,
+    )
+
+
+def _settlement_candidate(
+    view: SettlementView,
+    match: NameMatch,
+    profile: MerchantProfile,
+    *,
+    probability: float,
+    verified: bool,
+    tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+    runner_up: NameMatch | None,
+    extra: tuple[Evidence, ...] = (),
+) -> MatchCandidate:
+    return MatchCandidate(
+        candidate_id=candidate_id(
+            Tier.T3_FUZZY,
+            LinkType.SETTLEMENT_CREDITED_AS,
+            settlement_ref(view.settlement_id).key,
+            bank_ref(match.credit.txn_id).key,
+        ),
+        link_type=LinkType.SETTLEMENT_CREDITED_AS,
+        source_ref=settlement_ref(view.settlement_id),
+        target_ref=bank_ref(match.credit.txn_id),
+        tier=Tier.T3_FUZZY,
+        features=_features(view, match, tolerances),
+        evidence=(
+            *_evidence(view, match, profile, tolerances, lexical, runner_up),
+            *extra,
+        ),
+        calibrated_p=probability,
+        arithmetic_verified=verified,
+    )
+
+
+def _payment_candidates(
+    view: SettlementView,
+    match: NameMatch,
+    profile: MerchantProfile,
+    *,
+    probability: float,
+    verified: bool,
+    tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+    runner_up: NameMatch | None,
+) -> list[MatchCandidate]:
+    """Expand a lexically identified credit into the evaluation unit.
+
+    Identical allocation to every other tier: the credit is split across the
+    payments it carries by gross weight, with the charged-back payment (A08)
+    left out because its money never reached the bank. Sharing the rule keeps
+    a T3 link worth exactly what a T0 link is worth in rupees.
+    """
+    clawback = attribute_clawback(view)
+    excluded = clawback.excluded.payment_id if clawback.excluded is not None else None
+    covered = tuple(p for p in view.payments if p.payment_id != excluded)
+    if not covered:
+        return []
+
+    credit = match.credit
+    shares = allocate_minor(credit.credit_minor, [p.amount_minor for p in covered])
+    conserved = (
+        sum_minor(shares, field=f"{credit.txn_id}.allocation") == credit.credit_minor
+    )
+    features = _features(view, match, tolerances)
+    lexical_note = _evidence(view, match, profile, tolerances, lexical, runner_up)[0]
+
+    candidates: list[MatchCandidate] = []
+    for payment, share in zip(covered, shares, strict=True):
+        candidates.append(
+            MatchCandidate(
+                candidate_id=candidate_id(
+                    Tier.T3_FUZZY,
+                    LinkType.PAYMENT_CREDITED_AS,
+                    payment_ref(payment.payment_id).key,
+                    bank_ref(credit.txn_id).key,
+                ),
+                link_type=LinkType.PAYMENT_CREDITED_AS,
+                source_ref=payment_ref(payment.payment_id),
+                target_ref=bank_ref(credit.txn_id),
+                tier=Tier.T3_FUZZY,
+                features=features,
+                evidence=(
+                    lexical_note,
+                    Evidence(
+                        kind=EvidenceKind.ARITHMETIC_CHECK,
+                        detail=(
+                            f"allocated {format_minor(share)} of the "
+                            f"{format_minor(credit.credit_minor)} credit, by gross "
+                            f"weight; the {len(covered)} share(s) sum to the credit "
+                            "exactly"
+                        ),
+                        refs=(payment_ref(payment.payment_id), bank_ref(credit.txn_id)),
+                        amount_minor=share,
+                    ),
+                ),
+                calibrated_p=probability,
+                arithmetic_verified=verified and conserved,
+            )
+        )
+    return candidates
+
+
+def run_tier3(
+    context: MatchContext,
+    tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+    *,
+    profiles: dict[str, MerchantProfile] | None = None,
+) -> LexicalOutcome:
+    """Run T3 over whatever the keyed tiers left in the pool.
+
+    ``profiles`` is accepted so the re-run loop can build the merchant master
+    once rather than per pass -- it is derived from references, which do not
+    change as tiers consume records.
+    """
+    master = build_profiles(context) if profiles is None else profiles
+    candidates: list[MatchCandidate] = []
+    seen = resolved = ambiguous = unsolved = without_profile = 0
+    credits_matched = payments_matched = scored_count = below = margin_rejects = 0
+
+    for view in list(context.open_settlements()):
+        merchant = context.merchant_of(view)
+        profile = master.get(merchant) if merchant is not None else None
+        if profile is None or not profile:
+            without_profile += 1
+            continue
+        if not view.payments or view.net_minor <= 0:
+            continue
+
+        pool = _candidate_credits(view, context, tolerances, lexical)
+        if not pool:
+            continue
+
+        seen += 1
+        scored, examined, rejected = _best_names(view, profile, pool, lexical)
+        scored_count += examined
+        below += rejected
+
+        if not scored:
+            unsolved += 1
+            continue
+
+        best = scored[0]
+        runner_up = scored[1] if len(scored) > 1 else None
+        if runner_up is not None and best.score - runner_up.score < lexical.min_margin:
+            # Two credits the scorer cannot separate. Same refusal as every
+            # tier before this one, and the same uniform prior over them.
+            margin_rejects += 1
+            candidates.append(
+                _settlement_candidate(
+                    view,
+                    best,
+                    profile,
+                    probability=best.score / 2.0,
+                    verified=False,
+                    tolerances=tolerances,
+                    lexical=lexical,
+                    runner_up=None,
+                    extra=(_ambiguity_evidence(view, best, runner_up, lexical),),
+                )
+            )
+            context.consume(view.settlement_id)
+            ambiguous += 1
+            continue
+
+        verified = view.gross_reconciles
+        candidates.append(
+            _settlement_candidate(
+                view,
+                best,
+                profile,
+                probability=best.score,
+                verified=verified,
+                tolerances=tolerances,
+                lexical=lexical,
+                runner_up=runner_up,
+            )
+        )
+        expanded = _payment_candidates(
+            view,
+            best,
+            profile,
+            probability=best.score,
+            verified=verified,
+            tolerances=tolerances,
+            lexical=lexical,
+            runner_up=runner_up,
+        )
+        candidates.extend(expanded)
+        context.consume(view.settlement_id, [best.credit.txn_id])
+        resolved += 1
+        credits_matched += 1
+        payments_matched += len(expanded)
+
+    return LexicalOutcome(
+        candidates=tuple(candidates),
+        profiles_built=len(master),
+        profile_witnesses=sum(p.witnesses for p in master.values()),
+        settlements_seen=seen,
+        settlements_resolved=resolved,
+        settlements_ambiguous=ambiguous,
+        settlements_unsolved=unsolved,
+        settlements_without_profile=without_profile,
+        credits_matched=credits_matched,
+        payments_matched=payments_matched,
+        names_scored=scored_count,
+        rejected_below_score=below,
+        rejected_on_margin=margin_rejects,
+    )
