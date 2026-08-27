@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Protocol
 
 from ledgerloop.eval.metrics import PredictedLink, evaluation_links_by_class
+from ledgerloop.eval.reliability import CalibrationEvaluation
 from ledgerloop.eval.truth_io import DatasetManifest
+from ledgerloop.matching.calibration import ReliabilityDiagram
 from ledgerloop.models.metrics import RunMetrics
 from ledgerloop.models.truth import GroundTruth
 from ledgerloop.money import format_minor
@@ -98,10 +100,17 @@ class ScoredRun(Protocol):
 
 @dataclass(frozen=True)
 class EvaluatedRun:
-    """One system's predictions, already scored."""
+    """One system's predictions, already scored.
+
+    ``calibration`` is present only for a run that carried a fitted bundle. A
+    baseline has no probabilities to calibrate and an uncalibrated run has only
+    the tiers' provisional ones, so in both cases the section is *absent* rather
+    than rendered empty -- the same rule the tier table follows.
+    """
 
     system: ScoredRun
     metrics: RunMetrics
+    calibration: CalibrationEvaluation | None = None
 
 
 def _pct(value: float) -> str:
@@ -152,9 +161,10 @@ def _headline(run: EvaluatedRun) -> list[str]:
         else f"{_PENDING} (no exception classifier before Step 8)"
     )
     calibration = (
-        f"ECE {metrics.calibration.ece:.4f}"
+        f"ECE {metrics.calibration.ece:.4f} over {metrics.calibration.sample_count} "
+        f"residual links"
         if metrics.calibration
-        else f"{_PENDING} (no blender before Step 7)"
+        else f"{_PENDING} (run without `--calibration`)"
     )
 
     return [
@@ -325,6 +335,117 @@ def _tier_table(run: EvaluatedRun) -> list[str]:
     return lines
 
 
+def _absent(diagram: ReliabilityDiagram | None, field: str) -> str:
+    """One measure of a diagram that may not exist, rendered as ``--`` if it does not.
+
+    An absent population is not a population that measured zero, and the report
+    says so with a dash rather than a number nobody produced.
+    """
+    if diagram is None:
+        return "--"
+    value = getattr(diagram, field)
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    if field == "populated_bins":
+        return f"{value} of {len(diagram.bins)}"
+    return str(value)
+
+
+def _reliability_rows(diagram: ReliabilityDiagram) -> list[str]:
+    """The populated bins of one reliability diagram, as a table.
+
+    Empty bins are omitted rather than printed as zeros. A bin nothing landed in
+    is not a bin where the system was 0% accurate, and printing it that way is
+    the same mistake as rendering an empty denominator as a score.
+    """
+    rows = [
+        "| Confidence bin | n | Mean p | Observed | Gap |",
+        "|---|---|---|---|---|",
+    ]
+    rows.extend(
+        f"| `[{item.lower:.1f}, {item.upper:.1f})` | {item.count} | "
+        f"{item.mean_probability:.4f} | {item.empirical_rate:.4f} | "
+        f"{item.gap:+.4f} |"
+        for item in diagram.bins
+        if item.count > 0
+    )
+    return rows
+
+
+def _calibration_section(run: EvaluatedRun) -> list[str]:
+    """Calibration quality, over the two populations that answer different questions.
+
+    PLAN.md D3: "when the system says 90% confident, it is right ~90% of the
+    time". This is where that claim is checked, and both of its qualifications
+    are printed beside it:
+
+    * **Residual tiers only.** T0 and T1 bypass the blender, and folding ~70% of
+      volume at p = 1.0 into the measurement would produce an ECE describing the
+      shape of the corpus rather than the quality of the calibrator.
+    * **Populated bins.** An ECE computed over one populated bin says nothing at
+      all, and the count is printed so a reader can see that for themselves
+      rather than take a small number as a good one.
+    """
+    view = run.calibration
+    if view is None:
+        return []
+
+    asserted = view.asserted
+    lines = [
+        "### Calibration (PLAN.md §6.5, D3)",
+        "",
+        "Measured on the **residual tiers only** — T0 and T1 set their own probability",
+        "from a count rather than a model, and including ~70% of volume at `p = 1.0`",
+        "would measure the corpus rather than the calibrator (`ARCHITECTURE.md` §6, 4).",
+        "",
+        "| | Asserted | Contenders |",
+        "|---|---|---|",
+    ]
+    contenders = view.contenders
+    measures: tuple[tuple[str, str, str], ...] = (
+        ("Links", str(asserted.sample_count), _absent(contenders, "sample_count")),
+        ("...correct", str(asserted.positive_count), _absent(contenders, "positive_count")),
+        ("ECE", f"{asserted.ece:.4f}", _absent(contenders, "ece")),
+        ("Brier", f"{asserted.brier:.4f}", _absent(contenders, "brier")),
+        (
+            "Populated bins",
+            f"{asserted.populated_bins} of {len(asserted.bins)}",
+            _absent(contenders, "populated_bins"),
+        ),
+    )
+    lines.extend(
+        [
+            *(f"| {label} | {left} | {right} |" for label, left, right in measures),
+            "",
+            "**Asserted** is what the system actually claimed: the residual links it",
+            "auto-matched or referred, carrying the probability the fitted bundle gave",
+            "them. **Contenders** is every pairing the residual tiers *considered*,",
+            "including the ones they refused — a population the system never asserted",
+            "and the blender never scores, shown because it is the only population on",
+            "this corpus that contains wrong pairings at all.",
+            "",
+        ]
+    )
+    if asserted.populated_bins <= 1:
+        lines.extend(
+            [
+                "> One populated bin. The ECE above is therefore a statement about the",
+                "> corpus — the tiers refused everything they were unsure of — and not a",
+                "> demonstration that the calibrator discriminates. Reported rather than",
+                "> hidden: `CalibrationMetrics.populated_bins` exists for exactly this.",
+                "",
+            ]
+        )
+    lines.extend(["#### Reliability — asserted links", ""])
+    lines.extend(_reliability_rows(asserted))
+    lines.append("")
+    if contenders is not None:
+        lines.extend(["#### Reliability — every contender considered", ""])
+        lines.extend(_reliability_rows(contenders))
+        lines.append("")
+    return lines
+
+
 def _comparison_table(runs: Sequence[EvaluatedRun]) -> list[str]:
     lines = [
         "## System and baseline comparison (PLAN.md §9.2)",
@@ -367,6 +488,7 @@ def render_report(
     for run in runs:
         lines.extend(_headline(run))
         lines.extend(_link_table(run))
+        lines.extend(_calibration_section(run))
         lines.extend(_tier_table(run))
         lines.extend(_class_recall_table(run, truth))
         lines.extend(_money_table(run))

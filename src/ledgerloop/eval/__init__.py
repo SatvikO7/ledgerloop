@@ -14,6 +14,10 @@ The package has four parts:
   confidence interval, match rate, per-anomaly-class recall, and the money view.
 * :mod:`ledgerloop.eval.baselines` -- B0, the exact-join-on-UTR baseline. The
   "why not just SQL" answer, and the harness's first real input.
+* :mod:`ledgerloop.eval.reliability` -- labels a finished run's candidates and
+  measures ECE, Brier and the reliability bins. Reads ground truth to *label*,
+  never to fit: the fitting lives in :mod:`ledgerloop.matching.calibration` and
+  never touches the test split.
 * :mod:`ledgerloop.eval.report` -- renders ``EVALUATION.md``. Nothing in that
   document is hand-typed.
 """
@@ -35,12 +39,18 @@ from ledgerloop.eval.metrics import (
     recall_by_anomaly_class,
     wilson_interval,
 )
+from ledgerloop.eval.reliability import (
+    CalibrationEvaluation,
+    label_candidates,
+    measure_calibration,
+)
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
 from ledgerloop.eval.truth_io import DatasetManifest, load_ground_truth, load_manifest
 
 __all__ = [
     "EVALUATED_RECORD_TYPES",
     "BaselineRun",
+    "CalibrationEvaluation",
     "DatasetManifest",
     "EvaluatedRun",
     "LinkConfusion",
@@ -49,10 +59,12 @@ __all__ = [
     "PredictedLink",
     "confusion",
     "evaluate",
+    "label_candidates",
     "link_metrics",
     "load_ground_truth",
     "load_manifest",
     "match_rate",
+    "measure_calibration",
     "money_view",
     "recall_by_anomaly_class",
     "render_report",

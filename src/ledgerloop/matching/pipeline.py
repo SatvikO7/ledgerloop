@@ -47,6 +47,7 @@ from ledgerloop.config import RunConfig
 from ledgerloop.eval.metrics import PredictedLink
 from ledgerloop.ingest.dataset import IngestResult
 from ledgerloop.matching.bank_leg import BankLegOutcome, allocated_share_minor
+from ledgerloop.matching.calibration import BlendOutcome, CalibrationBundle, apply_bundle
 from ledgerloop.matching.context import MatchContext
 from ledgerloop.matching.policy import decide_all
 from ledgerloop.matching.tier0_exact import OrderLegOutcome, run_tier0
@@ -96,6 +97,8 @@ class MatchRun:
     lexical: LexicalOutcome = field(default_factory=LexicalOutcome)
     graph: GraphOutcome = field(default_factory=GraphOutcome)
     passes: int = 1
+    blend: BlendOutcome = field(default_factory=BlendOutcome)
+    calibrated: bool = False
 
     credits_seen: int = 0
     credits_with_utr: int = 0
@@ -277,13 +280,26 @@ def run_matching(
     config: RunConfig,
     *,
     decided_at: datetime | None = None,
+    bundle: CalibrationBundle | None = None,
 ) -> MatchRun:
-    """Run T0 then T1 over an ingested dataset.
+    """Run the tier ladder over an ingested dataset.
 
     ``decided_at`` stamps every decision in the run. One timestamp for the whole
     run rather than one per decision: the ordering that matters for replay is
     the audit sequence, not the clock, and a single stamp makes a run's decision
     log byte-comparable to a rerun of the same data.
+
+    ``bundle`` is the fitted blender, isotonic calibrator and threshold from
+    Step 7. Without it the residual tiers keep the provisional probabilities
+    they set themselves -- which is what every step up to Step 6 measured, and
+    what the ``--no-calibration`` ablation row still measures. With it, each
+    residual pass is scored **as it is produced**, before T4 reads the pass as
+    its premise set: T4 admits only premises at or above ``tau_high``, so
+    calibrating afterwards would let it infer from links the policy was about to
+    refuse. The threshold itself comes from ``config.thresholds``, which
+    :func:`~ledgerloop.matching.calibration.configure_for` fills from the same
+    bundle -- so a fitted threshold is inside ``config_hash`` rather than
+    beside it.
     """
     started_ns = time.perf_counter_ns()
     stamp = decided_at or datetime.now()
@@ -327,6 +343,13 @@ def run_matching(
         )
         t3_ms += (time.perf_counter_ns() - started) // 1_000_000
 
+        if bundle is not None:
+            # Scored here, before T4 reads this pass as its premise set: T4
+            # admits only premises at or above tau_high, so calibrating
+            # afterwards would let it infer from links the policy was about to
+            # refuse. The authoritative count is taken once at the end.
+            apply_bundle((*pass_aggregation.candidates, *pass_lexical.candidates), bundle)
+
         established = (
             *order_leg.candidates,
             *t0_bank.candidates,
@@ -338,6 +361,9 @@ def run_matching(
         started = time.perf_counter_ns()
         pass_graph = run_tier4(context, established, config.graph, config.thresholds)
         t4_ms += (time.perf_counter_ns() - started) // 1_000_000
+
+        if bundle is not None:
+            apply_bundle(pass_graph.candidates, bundle)
 
         residual.extend(pass_aggregation.candidates)
         residual.extend(pass_lexical.candidates)
@@ -356,6 +382,13 @@ def run_matching(
         *t1_bank.candidates,
         *residual,
     ]
+    # One authoritative pass over every candidate, T0 and T1 included, so the
+    # reported counters describe the whole run rather than the residual passes.
+    # Re-scoring an already-scored candidate is idempotent: the same features go
+    # through the same fitted model.
+    blend = (
+        apply_bundle(candidates, bundle) if bundle is not None else BlendOutcome()
+    )
     decisions = decide_all(candidates, config.thresholds, decided_at=stamp)
 
     state = ReconState(run_id=config.run_id, config=config)
@@ -394,6 +427,8 @@ def run_matching(
         lexical=lexical,
         graph=graph,
         passes=passes,
+        blend=blend,
+        calibrated=bundle is not None,
         credits_seen=len(context.credits),
         credits_with_utr=context.credits_with_utr,
         settlements_seen=len(context.settlements),

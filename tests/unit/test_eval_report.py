@@ -95,9 +95,13 @@ class TestPendingIsNotZero:
         text, _ = rendered
         assert "no exception classifier before Step 8" in text
 
-    def test_calibration_is_pending_before_step_7(self, rendered):
+    def test_calibration_is_pending_when_the_run_was_not_calibrated(self, rendered):
+        """Step 7 built the blender, so the reason changed: it is now a run without
+        a bundle rather than a component that does not exist. Still pending, still
+        never a zero."""
         text, _ = rendered
-        assert "no blender before Step 7" in text
+        assert "run without `--calibration`" in text
+        assert "### Calibration" not in text
 
     def test_unbuilt_baselines_are_listed_as_pending(self, rendered):
         text, _ = rendered

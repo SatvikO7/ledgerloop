@@ -10,6 +10,10 @@ never had to work for would inflate every number in the report.
 
 WHY A CONFIDENCE INTERVAL, AND WHY WILSON
 -----------------------------------------
+(:func:`~ledgerloop.stats.wilson_interval` itself moved to
+:mod:`ledgerloop.stats` at Step 7, so the calibrator could use it without
+``matching`` depending on ``eval``. It is re-exported here unchanged.)
+
 The target is precision >= 0.99 on a test split carrying roughly 250 evaluable
 links. At that size one wrong decision moves precision from 1.000 to 0.996 --
 a headline "0.99" is indistinguishable from a lucky 0.97. So the point estimate
@@ -44,7 +48,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from math import sqrt
 
 from ledgerloop.models.base import FrozenLedgerModel, MinorUnits
 from ledgerloop.models.enums import AnomalyClass, LinkType, RecordType
@@ -52,6 +55,7 @@ from ledgerloop.models.metrics import LinkMetrics, RunMetrics, TierContribution
 from ledgerloop.models.refs import RecordRef
 from ledgerloop.models.truth import GroundTruth, TruthPair
 from ledgerloop.money import sum_minor
+from ledgerloop.stats import Z_95, wilson_interval
 
 __all__ = [
     "EVALUATED_RECORD_TYPES",
@@ -69,9 +73,6 @@ __all__ = [
     "recall_by_anomaly_class",
     "wilson_interval",
 ]
-
-#: Two-sided 95% normal quantile.
-Z_95 = 1.959963984540054
 
 #: The record types the evaluation unit touches.
 #:
@@ -186,43 +187,6 @@ class MoneyView:
 def _ratio(numerator: int, denominator: int) -> float:
     """Zero denominator yields 0.0 -- see the module docstring."""
     return numerator / denominator if denominator > 0 else 0.0
-
-
-def wilson_interval(successes: int, trials: int, *, z: float = Z_95) -> tuple[float, float]:
-    """Wilson score interval for a binomial proportion.
-
-    Returns ``(0.0, 1.0)`` on zero trials: with no evidence, every proportion
-    remains possible, and that is the interval that says so.
-    """
-    if successes < 0 or trials < 0:
-        raise ValueError("successes and trials must be non-negative")
-    if successes > trials:
-        raise ValueError(f"successes ({successes}) cannot exceed trials ({trials})")
-    if trials == 0:
-        return (0.0, 1.0)
-
-    proportion = successes / trials
-    z_squared = z * z
-    denominator = 1.0 + z_squared / trials
-    centre = (proportion + z_squared / (2 * trials)) / denominator
-    half_width = (
-        z
-        / denominator
-        * sqrt(proportion * (1.0 - proportion) / trials + z_squared / (4 * trials * trials))
-    )
-    low = max(0.0, centre - half_width)
-    high = min(1.0, centre + half_width)
-
-    # At the boundaries the algebra is exact -- a run with no failures has an
-    # upper bound of exactly 1, and one with no successes a lower bound of
-    # exactly 0 -- but the floating-point evaluation lands a few ulps short
-    # (0.9999999999999998 at 250/250). Those two cases are the ones this project
-    # reports most often, so they are pinned rather than left to round.
-    if successes == trials:
-        high = 1.0
-    if successes == 0:
-        low = 0.0
-    return (low, high)
 
 
 def confusion(

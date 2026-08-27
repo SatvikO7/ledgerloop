@@ -86,6 +86,9 @@ __all__ = [
     "MerchantProfile",
     "NameMatch",
     "build_profiles",
+    "candidate_credits",
+    "features_for",
+    "rank_credits",
     "run_tier3",
     "score_names",
 ]
@@ -205,13 +208,24 @@ def build_profiles(context: MatchContext) -> dict[str, MerchantProfile]:
     }
 
 
-def _best_names(
+def rank_credits(
     view: SettlementView,
     profile: MerchantProfile,
     credits: tuple[CanonicalBankTxn, ...],
     lexical: LexicalMatching,
+    *,
+    gate: float | None = None,
 ) -> tuple[list[NameMatch], int, int]:
-    """Score every candidate credit against the profile, keeping those that pass."""
+    """Score every candidate credit against the profile, keeping those that pass.
+
+    ``gate`` overrides :attr:`LexicalMatching.min_score`. The tier always uses
+    the configured gate; Step 7's candidate harvester passes ``0.0`` so the
+    credits the gate *rejects* are collected too. Those rejections are the
+    blender's negatives -- a credit the tier declined is a labelled example of
+    what a wrong pairing looks like, and discarding it here would leave the
+    training set with nothing but the pairings that were right.
+    """
+    minimum = lexical.min_score if gate is None else gate
     scored: list[NameMatch] = []
     below = 0
     for txn in credits:
@@ -222,7 +236,7 @@ def _best_names(
             score = score_names(txn.extracted_merchant, spelling)
             if score > best:
                 best, best_spelling = score, spelling
-        if best < lexical.min_score:
+        if best < minimum:
             below += 1
             continue
         scored.append(NameMatch(credit=txn, score=best, matched_spelling=best_spelling))
@@ -234,7 +248,7 @@ def _best_names(
     return scored, len(credits), below
 
 
-def _candidate_credits(
+def candidate_credits(
     view: SettlementView, context: MatchContext, tolerances: MatchingTolerances,
     lexical: LexicalMatching,
 ) -> tuple[CanonicalBankTxn, ...]:
@@ -257,7 +271,7 @@ def _candidate_credits(
     return tuple(picked)
 
 
-def _features(
+def features_for(
     view: SettlementView, match: NameMatch, tolerances: MatchingTolerances
 ) -> FeatureVector:
     delta = match.credit.credit_minor - view.net_minor
@@ -391,7 +405,7 @@ def _settlement_candidate(
         source_ref=settlement_ref(view.settlement_id),
         target_ref=bank_ref(match.credit.txn_id),
         tier=Tier.T3_FUZZY,
-        features=_features(view, match, tolerances),
+        features=features_for(view, match, tolerances),
         evidence=(
             *_evidence(view, match, profile, tolerances, lexical, runner_up),
             *extra,
@@ -430,7 +444,7 @@ def _payment_candidates(
     conserved = (
         sum_minor(shares, field=f"{credit.txn_id}.allocation") == credit.credit_minor
     )
-    features = _features(view, match, tolerances)
+    features = features_for(view, match, tolerances)
     lexical_note = _evidence(view, match, profile, tolerances, lexical, runner_up)[0]
 
     candidates: list[MatchCandidate] = []
@@ -496,12 +510,12 @@ def run_tier3(
         if not view.payments or view.net_minor <= 0:
             continue
 
-        pool = _candidate_credits(view, context, tolerances, lexical)
+        pool = candidate_credits(view, context, tolerances, lexical)
         if not pool:
             continue
 
         seen += 1
-        scored, examined, rejected = _best_names(view, profile, pool, lexical)
+        scored, examined, rejected = rank_credits(view, profile, pool, lexical)
         scored_count += examined
         below += rejected
 

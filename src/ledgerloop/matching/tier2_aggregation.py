@@ -95,10 +95,13 @@ from ledgerloop.money import (
 __all__ = [
     "AggregationOutcome",
     "Assignment",
+    "accept_for",
     "credit_bucket",
     "expected_credit_minor",
+    "features_for",
     "payment_bucket",
     "run_tier2",
+    "search_window",
 ]
 
 
@@ -200,7 +203,7 @@ def expected_credit_minor(gross_minor: int, view_gross: int, net_minor: int) -> 
     return allocate_minor(net_minor, [gross_minor, view_gross - gross_minor])[0]
 
 
-def _search_window(
+def search_window(
     credit_minor: int, view_gross: int, net_minor: int, epsilon: int
 ) -> tuple[int, int]:
     """The gross range whose implied credit could land within ``epsilon``.
@@ -219,7 +222,7 @@ def _subset_refs(payments: tuple[CanonicalPayment, ...]) -> tuple[RecordRef, ...
     return tuple(payment_ref(p.payment_id) for p in payments)
 
 
-def _features(assignment: Assignment, view: SettlementView, epsilon: int) -> FeatureVector:
+def features_for(assignment: Assignment, view: SettlementView, epsilon: int) -> FeatureVector:
     residual = assignment.residual_minor
     return FeatureVector(
         tier=Tier.T2_AGGREGATION,
@@ -361,7 +364,7 @@ def _settlement_candidate(
         source_ref=settlement_ref(view.settlement_id),
         target_ref=bank_ref(assignment.credit.txn_id),
         tier=Tier.T2_AGGREGATION,
-        features=_features(assignment, view, epsilon),
+        features=features_for(assignment, view, epsilon),
         evidence=(
             _subset_evidence(assignment, view, epsilon),
             _uniqueness_evidence(assignment, view),
@@ -393,7 +396,7 @@ def _payment_candidates(
     conserved = (
         sum_minor(shares, field=f"{credit.txn_id}.allocation") == credit.credit_minor
     )
-    features = _features(assignment, view, epsilon)
+    features = features_for(assignment, view, epsilon)
     subset = _subset_refs(assignment.payments)
     subset_evidence = _subset_evidence(assignment, view, epsilon)
 
@@ -463,7 +466,7 @@ class _Attempt:
     greedy: int = 0
 
 
-def _accept_for(target: int, gross: int, net: int, epsilon: int) -> Accept:
+def accept_for(target: int, gross: int, net: int, epsilon: int) -> Accept:
     """The exact re-derivation a candidate subset has to survive.
 
     Bound as a factory rather than written inline in the loop, so the credit it
@@ -510,7 +513,7 @@ def _solve(
                 return attempt
             search = _remainder_search(tuple(range(len(remaining))), subtotal)
         else:
-            low, high = _search_window(credit.credit_minor, gross, net, epsilon)
+            low, high = search_window(credit.credit_minor, gross, net, epsilon)
             search = find_subsets(
                 [p.amount_minor for p in remaining],
                 low,
@@ -518,7 +521,7 @@ def _solve(
                 want=2,
                 max_exact_items=tolerances.max_subset_size,
                 timeout_ms=tolerances.subset_solver_timeout_ms,
-                accept=_accept_for(credit.credit_minor, gross, net, epsilon),
+                accept=accept_for(credit.credit_minor, gross, net, epsilon),
             )
             attempt.examined += search.examined
             if search.method == "greedy":
