@@ -295,10 +295,17 @@ class TestTheLinearSolver:
         ),
     )
     def test_a_solution_satisfies_the_system_it_came_from(self, diagonal, target):
-        """Diagonally dominant by construction, so a solution must exist."""
+        """Diagonally dominant by construction, so a solution must exist.
+
+        *Strictly* dominant: the off-diagonal is drawn from the same range as the
+        diagonal shift, so the diagonal has to start above it. At ``10.0`` an
+        off-diagonal of exactly 10 makes the two rows identical and the system
+        singular -- which the solver correctly refuses, and which was this
+        strategy's bug rather than the solver's.
+        """
         matrix = [
-            [10.0 + abs(diagonal[0]), diagonal[1]],
-            [diagonal[1], 10.0 + abs(diagonal[2])],
+            [20.0 + abs(diagonal[0]), diagonal[1]],
+            [diagonal[1], 20.0 + abs(diagonal[2])],
         ]
         solution = solve_symmetric(matrix, target)
         for row, value in zip(matrix, target, strict=True):

@@ -16,19 +16,36 @@ that the test split was never fitted on.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, RunConfig
+from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
 from ledgerloop.eval.baselines import run_b0
-from ledgerloop.eval.metrics import evaluate
+from ledgerloop.eval.metrics import evaluate, exception_coverage
 from ledgerloop.eval.reliability import measure_calibration, score_contenders
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
 from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
+from ledgerloop.exceptions import (
+    classify_exceptions,
+    mark_resolvable,
+    resolve_bounded,
+)
 from ledgerloop.fitting import FittingError, fit_from_corpora, harvest_corpora
 from ledgerloop.generator import generate_to_disk
 from ledgerloop.ingest import IngestError, ingest_dataset
+from ledgerloop.llm.client import LLMClient, build_provider
+from ledgerloop.llm.integration import (
+    LLMRunSummary,
+    adjudicator_for,
+    explain_queue,
+    repair_narrations,
+)
+from ledgerloop.llm.tasks import (
+    AdjudicationOutcome,
+    NarrationOutcome,
+)
 from ledgerloop.matching import run_matching
 from ledgerloop.matching.blender import DEFAULT_L2
 from ledgerloop.matching.calibration import CalibrationBundle, configure_for
@@ -164,6 +181,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="a bundle written by `ledgerloop calibrate`. Without it the residual "
         "tiers keep the provisional probabilities they set themselves, which is the "
         "uncalibrated ablation row.",
+    )
+    evaluation.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="run the whole pipeline deterministically, with no model and no "
+        "network. The default when no API key is present, so this flag is how a "
+        "run with a key available is made to prove it does not need one.",
+    )
+    evaluation.add_argument(
+        "--llm-key-env",
+        default="LEDGERLOOP_LLM_API_KEY",
+        help="environment variable holding the provider key "
+        "(default LEDGERLOOP_LLM_API_KEY). Absent means the deterministic path.",
+    )
+    evaluation.add_argument(
+        "--show-exceptions",
+        type=int,
+        default=5,
+        help="how many of the highest-impact exceptions to print (default 5)",
     )
     evaluation.add_argument(
         "--out",
@@ -357,7 +393,30 @@ def _run_eval(args: argparse.Namespace) -> int:
     # The system first, then the floor it has to beat. Both are scored against
     # the same truth read off the same files, so the comparison is exact.
     ingested = ingest_dataset(directory, strict=False)
-    config = RunConfig(run_id=f"t0t4-{tag}", split=manifest.split, seed=manifest.seed)
+
+    # The model is optional, and the absence of a key is not an error: a machine
+    # without credentials runs the whole pipeline deterministically and says so.
+    # `--no-llm` reaches the same place deliberately rather than by accident.
+    wanted = not args.no_llm
+    api_key = os.environ.get(args.llm_key_env) if wanted else None
+    llm_config = LLMConfig(enabled=wanted)
+    provider = build_provider(llm_config, api_key=api_key)
+    client = LLMClient(config=llm_config, provider=provider)
+    tiers = (0, 1, 2, 3, 4, 5) if client.enabled else (0, 1, 2, 3, 4)
+
+    config = RunConfig(
+        run_id=f"t0t{tiers[-1]}-{tag}",
+        split=manifest.split,
+        seed=manifest.seed,
+        enabled_tiers=tiers,
+        llm=llm_config,
+    )
+
+    narration = NarrationOutcome()
+    if client.enabled:
+        ingested, narration = repair_narrations(
+            client, ingested, batch_size=llm_config.narration_batch_size
+        )
 
     bundle = None
     if args.calibration is not None:
@@ -376,7 +435,15 @@ def _run_eval(args: argparse.Namespace) -> int:
             return 1
         config = configure_for(config, bundle)
 
-    matched = run_matching(ingested, config, bundle=bundle)
+    matched = run_matching(
+        ingested,
+        config,
+        bundle=bundle,
+        adjudicator=adjudicator_for(client, config),
+    )
+    adjudication = matched.adjudication
+    if not isinstance(adjudication, AdjudicationOutcome):
+        adjudication = AdjudicationOutcome()
 
     # Ground truth enters here to *label* a finished run, never to change one.
     # The bundle was fitted before this command ran, on splits this dataset is
@@ -391,17 +458,57 @@ def _run_eval(args: argparse.Namespace) -> int:
             contender_labels=contenders.labels,
         )
 
+    # The exception queue. Built from the sources and the run's own decisions;
+    # ground truth is not an input to it, and is used below only to score it.
+    assert matched.context is not None  # run_matching always sets it
+    queue = classify_exceptions(
+        matched.context,
+        matched.decisions,
+        matched.candidates,
+        config,
+        merchant_profiles=matched.merchant_spellings,
+    )
+    resolutions = resolve_bounded(queue.exceptions, config.auto_resolution)
+    exceptions = mark_resolvable(queue.exceptions, resolutions)
+
+    # Call site 3. The class, the severity and the money are already decided and
+    # are not sent back for revision; only the prose can change.
+    exceptions, explanation = explain_queue(client, exceptions)
+    llm_summary = LLMRunSummary(
+        narration=narration, adjudication=adjudication, explanation=explanation
+    )
+    cost = client.ledger()
+
     metrics = evaluate(
         matched.predictions,
         truth,
         run_id=config.run_id,
         wall_clock_ms=matched.wall_clock_ms,
         tier_contributions=matched.tier_contributions,
+        exceptions=exceptions,
+        out_of_scope_refs=matched.out_of_scope_refs,
     )
     if calibration_view is not None:
         metrics.calibration = calibration_view.asserted.metrics()
+    metrics.cost = cost
+    coverage = exception_coverage(
+        exceptions, truth, out_of_scope=matched.out_of_scope_refs
+    )
     scored = [
-        EvaluatedRun(system=matched, metrics=metrics, calibration=calibration_view)
+        EvaluatedRun(
+            system=matched,
+            metrics=metrics,
+            calibration=calibration_view,
+            exceptions=exceptions,
+            coverage=coverage,
+            resolutions=resolutions.resolutions,
+            rounding_spent_minor=resolutions.rounding_spent_minor,
+            cost=cost if client.enabled else None,
+            llm_accepted=llm_summary.accepted,
+            llm_rejected_ungrounded=llm_summary.rejected_ungrounded,
+            llm_rejected_unverified=llm_summary.rejected_unverified,
+            llm_prose_rewritten=explanation.rewritten,
+        )
     ]
 
     baseline = run_b0(directory)
@@ -474,6 +581,51 @@ def _run_eval(args: argparse.Namespace) -> int:
                 f"Brier {contender.brier:.4f} - {contender.sample_count} pairings "
                 f"({wrong} of them wrong)"
             )
+    print(
+        f"  exceptions: {len(exceptions)} raised covering "
+        f"{format_minor(sum(e.impact_minor for e in exceptions))} - "
+        f"{len(queue.unmatchable)} unmatchable (the honest floor) - "
+        f"{len(resolutions.applied)} auto-resolvable within bounds"
+    )
+    print(
+        f"      recall {coverage.recall:.4f} over {len(coverage.expected)} records "
+        f"ground truth calls exceptions ({len(coverage.missed)} missed) - "
+        f"unmatchable coverage {coverage.unmatchable_recall:.4f} over "
+        f"{len(coverage.unmatchable)} - {coverage.out_of_scope} outgoing rows "
+        "outside the unit"
+    )
+    if args.show_exceptions > 0:
+        for exception in exceptions[: args.show_exceptions]:
+            print(
+                f"      [{exception.severity.value:<8}] "
+                f"{format_minor(exception.impact_minor):>16}  "
+                f"{exception.exception_class.value:<26} "
+                f"{exception.involved_refs[0].record_id}"
+            )
+            print(f"          {exception.root_cause}")
+            print(f"          -> {exception.suggested_action}")
+    if not client.enabled:
+        reason = "--no-llm" if args.no_llm else f"no key in ${args.llm_key_env}"
+        print(f"  llm: disabled ({reason}); every number above is deterministic")
+    else:
+        print(
+            f"  llm: {cost.llm_calls} call(s) - {cost.cache_hits} cache hit(s) - "
+            f"{cost.total_tokens} tokens - "
+            f"{cost.calls_per_100_records(metrics.record_count):.2f} calls per 100 "
+            f"records - actual ₹{cost.actual_cost_inr:.2f} - "
+            f"equivalent paid ₹{cost.equivalent_paid_cost_inr:.2f}"
+        )
+        print(
+            f"      accepted {llm_summary.accepted} - refused {llm_summary.rejected_ungrounded} "
+            f"ungrounded - {llm_summary.rejected_unverified} failing verify_arithmetic - "
+            f"{llm_summary.calls_refused} call(s) fell back"
+        )
+        print(
+            f"      narrations repaired {narration.accepted}/{narration.attempted} - "
+            f"T5 candidates {len(adjudication.candidates)} "
+            f"({adjudication.demoted} demoted) - prose rewritten "
+            f"{explanation.rewritten}/{len(exceptions)}"
+        )
     if ingested.problems:
         print(f"  {len(ingested.problems)} malformed source records quarantined", file=sys.stderr)
     print(f"  wrote {args.out}")

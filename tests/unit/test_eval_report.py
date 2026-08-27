@@ -91,9 +91,12 @@ class TestDeterminism:
 
 
 class TestPendingIsNotZero:
-    def test_exception_recall_is_pending_before_step_8(self, rendered):
+    def test_exception_recall_is_pending_for_a_system_that_raises_none(self, rendered):
+        """Step 8 built the classifier, so the reason changed: this run is B0, which
+        has no exception queue at all. Still pending, still never a zero."""
         text, _ = rendered
-        assert "no exception classifier before Step 8" in text
+        assert "this system raises no exceptions" in text
+        assert "### The exception queue" not in text
 
     def test_calibration_is_pending_when_the_run_was_not_calibrated(self, rendered):
         """Step 7 built the blender, so the reason changed: it is now a run without
@@ -104,11 +107,12 @@ class TestPendingIsNotZero:
         assert "### Calibration" not in text
 
     def test_unbuilt_baselines_are_listed_as_pending(self, rendered):
+        """B3 left the pending list at Step 8: the full ladder now runs and is
+        scored as a real row rather than being promised."""
         text, _ = rendered
-        for name in ("B1", "B2", "B3"):
+        for name in ("B1", "B2"):
             assert f"| {name} |" in text
         assert "_pending_ (Step 10)" in text
-        assert "_pending_ (Step 8)" in text
 
     def test_a_zero_denominator_renders_as_na_not_as_zero(self):
         """The single most common way an evaluation report misleads."""

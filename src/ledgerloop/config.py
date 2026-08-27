@@ -37,6 +37,7 @@ __all__ = [
     "LexicalMatching",
     "MatchingTolerances",
     "RunConfig",
+    "SeverityThresholds",
     "prevalence_for",
 ]
 
@@ -165,6 +166,42 @@ class DecisionThresholds(FrozenLedgerModel):
         if self.tau_low > self.tau_high:
             raise ValueError(
                 f"tau_low ({self.tau_low}) must not exceed tau_high ({self.tau_high})"
+            )
+        return self
+
+
+class SeverityThresholds(FrozenLedgerModel):
+    """Rupee bands for exception severity, plus the age escalation (PLAN.md 8.1).
+
+    Severity is "driven by rupee impact + age", which leaves the bands
+    unstated. They live here rather than in the classifier so that a queue
+    ordering cannot be separated from the values that produced it -- they
+    travel in ``RunConfig.config_hash`` like every other tunable.
+
+    Age escalates by **one step and never more**, and never downwards. An old
+    twelve-rupee drift is still a twelve-rupee drift.
+    """
+
+    critical_minor: MinorUnits = Field(
+        default=10_000_000, description="₹1,00,000. A payout at this size is a phone call."
+    )
+    high_minor: MinorUnits = Field(default=1_000_000, description="₹10,000.")
+    medium_minor: MinorUnits = Field(default=100_000, description="₹1,000.")
+    escalate_after_days: int = Field(
+        default=14,
+        ge=0,
+        description="Age past which severity rises one step. Measured against the "
+        "dataset's own latest date, never the wall clock, so a queue is "
+        "reproducible and the report stays timestamp-free.",
+    )
+
+    @model_validator(mode="after")
+    def _bands_descend(self) -> SeverityThresholds:
+        if not self.critical_minor > self.high_minor > self.medium_minor:
+            raise ValueError(
+                "severity bands must strictly descend: "
+                f"critical {self.critical_minor} > high {self.high_minor} > "
+                f"medium {self.medium_minor}"
             )
         return self
 
@@ -358,6 +395,7 @@ class RunConfig(FrozenLedgerModel):
     lexical: LexicalMatching = Field(default_factory=LexicalMatching)
     graph: GraphInference = Field(default_factory=GraphInference)
     thresholds: DecisionThresholds = Field(default_factory=DecisionThresholds)
+    severity: SeverityThresholds = Field(default_factory=SeverityThresholds)
     auto_resolution: AutoResolutionBounds = Field(default_factory=AutoResolutionBounds)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 

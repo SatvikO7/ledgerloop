@@ -28,11 +28,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ledgerloop.eval.metrics import PredictedLink, evaluation_links_by_class
+from ledgerloop.eval.metrics import (
+    ExceptionCoverage,
+    PredictedLink,
+    evaluation_links_by_class,
+)
 from ledgerloop.eval.reliability import CalibrationEvaluation
 from ledgerloop.eval.truth_io import DatasetManifest
 from ledgerloop.matching.calibration import ReliabilityDiagram
-from ledgerloop.models.metrics import RunMetrics
+from ledgerloop.models.metrics import CostLedger, RunMetrics
+from ledgerloop.models.recon_exception import ReconException
+from ledgerloop.models.resolution import AutoResolution
 from ledgerloop.models.truth import GroundTruth
 from ledgerloop.money import format_minor
 
@@ -44,7 +50,6 @@ __all__ = ["PENDING_BASELINES", "EvaluatedRun", "ScoredRun", "render_report", "w
 PENDING_BASELINES: tuple[tuple[str, str, str], ...] = (
     ("B1", "Exact + fuzzy -- the typical hackathon submission", "Step 10"),
     ("B2", "LLM-only, run on the 60-record dev split", "Step 10"),
-    ("B3", "LedgerLoop, full ladder", "Step 8"),
 )
 
 _PENDING = "_pending_"
@@ -111,6 +116,15 @@ class EvaluatedRun:
     system: ScoredRun
     metrics: RunMetrics
     calibration: CalibrationEvaluation | None = None
+    exceptions: tuple[ReconException, ...] = ()
+    coverage: ExceptionCoverage | None = None
+    resolutions: tuple[AutoResolution, ...] = ()
+    rounding_spent_minor: int = 0
+    cost: CostLedger | None = None
+    llm_accepted: int = 0
+    llm_rejected_ungrounded: int = 0
+    llm_rejected_unverified: int = 0
+    llm_prose_rewritten: int = 0
 
 
 def _pct(value: float) -> str:
@@ -158,7 +172,7 @@ def _headline(run: EvaluatedRun) -> list[str]:
     exception_recall = (
         _pct(metrics.exception_recall)
         if metrics.exceptions_by_class
-        else f"{_PENDING} (no exception classifier before Step 8)"
+        else f"{_PENDING} (this system raises no exceptions)"
     )
     calibration = (
         f"ECE {metrics.calibration.ece:.4f} over {metrics.calibration.sample_count} "
@@ -446,6 +460,243 @@ def _calibration_section(run: EvaluatedRun) -> list[str]:
     return lines
 
 
+QUEUE_PREVIEW = 10
+
+
+def _exception_queue(run: EvaluatedRun) -> list[str]:
+    """The deliverable: what a controller would actually work through.
+
+    PLAN.md 8.2.2 -- "a bare 'unmatched' count is not a deliverable" -- and
+    8.2.3, which fixes the ordering: **descending rupee impact**, never count and
+    never class. One ₹4 lakh payout matters more than two hundred one-paise
+    drifts, and any other sort order hides that.
+
+    Only the top rows are printed in full. The point of the section is to show
+    that every row carries a class, a price, a cause and an action; printing
+    ninety of them would prove the same thing at ninety times the length.
+    """
+    exceptions = run.exceptions
+    if not exceptions:
+        return []
+
+    coverage = run.coverage
+    total = sum(item.impact_minor for item in exceptions)
+    lines = [
+        "### The exception queue (PLAN.md §8)",
+        "",
+        f"{len(exceptions)} exceptions covering {format_minor(total)}, sorted by rupee",
+        "impact descending. Every row carries a class, a severity, a money figure, an",
+        "evidence chain pointing back at source records, a root cause and an action.",
+        "",
+    ]
+    if coverage is not None:
+        lines.extend(
+            [
+                "| | |",
+                "|---|---|",
+                f"| Exceptions raised | {coverage.raised} |",
+                f"| Records ground truth calls exceptions | {len(coverage.expected)} |",
+                f"| ...covered by the queue | {len(coverage.covered_expected)} |",
+                f"| **Exception recall** | **{_pct(coverage.recall)}** |",
+                f"| Records unmatchable by construction | {len(coverage.unmatchable)} |",
+                f"| ...covered by the queue | {len(coverage.covered_unmatchable)} "
+                f"({_ratio_cell(coverage.unmatchable_recall, len(coverage.unmatchable))}) |",
+                f"| Outgoing rows outside the unit | {coverage.out_of_scope} |",
+                "",
+                "Unmatchable records are counted on their own line and **not** inside the",
+                "recall figure. Raising an exception for one is the correct behaviour --",
+                "it is how the honest floor gets reported -- but crediting it in the",
+                "headline would let a system inflate its recall by describing items nobody",
+                "could have resolved. Outgoing rows are money leaving the account rather",
+                "than a payout being reconciled, so they are outside the unit entirely and",
+                "the count is printed rather than the rows being dropped quietly.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            f"#### Highest impact ({min(QUEUE_PREVIEW, len(exceptions))} of {len(exceptions)})",
+            "",
+            "| Severity | Impact | Class | Subject | Confidence | Agent |",
+            "|---|---|---|---|---|---|",
+        ]
+    )
+    lines.extend(
+        f"| {item.severity.value} | {format_minor(item.impact_minor)} | "
+        f"`{item.exception_class.value}` | `{item.involved_refs[0].record_id}` | "
+        f"{item.classification_confidence:.2f} | "
+        f"{'bounded' if item.resolvable_by_agent else 'proposal only'} |"
+        for item in exceptions[:QUEUE_PREVIEW]
+    )
+    top = exceptions[0]
+    lines.extend(
+        [
+            "",
+            "The top row in full, because a table cell cannot carry an evidence chain:",
+            "",
+            f"> **{top.exception_class.value}** · {top.severity.value} · "
+            f"{format_minor(top.impact_minor)} · confidence "
+            f"{top.classification_confidence:.2f}",
+            ">",
+            f"> {top.root_cause}",
+            ">",
+            f"> **Next:** {top.suggested_action}",
+            ">",
+            f"> Evidence ({len(top.evidence)} items), first three:",
+        ]
+    )
+    lines.extend(f"> - {item.detail}" for item in top.evidence[:3])
+    lines.append("")
+    return lines
+
+
+def _exception_class_table(run: EvaluatedRun) -> list[str]:
+    counts = run.metrics.exceptions_by_class
+    if not counts:
+        return []
+    impact: dict[str, int] = {}
+    for item in run.exceptions:
+        key = item.exception_class.value
+        impact[key] = impact.get(key, 0) + item.impact_minor
+    lines = [
+        "#### Queue by class",
+        "",
+        "| Class | Count | Impact |",
+        "|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{name.value}` | {count} | {format_minor(impact.get(name.value, 0))} |"
+        for name, count in counts.items()
+    )
+    lines.append("")
+    return lines
+
+
+def _confusion_matrix(run: EvaluatedRun) -> list[str]:
+    """True anomaly class against predicted exception class.
+
+    **Rectangular on purpose** -- eleven anomaly classes against thirteen
+    exception classes (`ARCHITECTURE.md` §6, 5). The two vocabularies answer
+    different questions: one describes what the generator did to the data, the
+    other what the system concluded about it. A square matrix would be an
+    identity nobody measured.
+
+    An exception is attributed to every anomaly touching any record it names, so
+    the rows do not partition the queue and do not sum to its size.
+    """
+    matrix = run.metrics.exception_confusion
+    if not matrix:
+        return []
+    predicted = sorted({name for row in matrix.values() for name in row})
+    lines = [
+        "#### Anomaly → exception confusion",
+        "",
+        "| True anomaly | " + " | ".join(f"`{name}`" for name in predicted) + " |",
+        "|---" * (len(predicted) + 1) + "|",
+    ]
+    for anomaly, row in matrix.items():
+        cells = " | ".join(str(row.get(name, 0)) or "·" for name in predicted)
+        lines.append(f"| `{anomaly}` | {cells} |")
+    lines.extend(
+        [
+            "",
+            "Rows may overlap: an exception naming a settlement, its payments and their",
+            "orders is attributed to every anomaly touching any of them, so the rows do",
+            "not partition the queue and do not sum to its size.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _auto_resolution(run: EvaluatedRun) -> list[str]:
+    """The leash, printed. PLAN.md §8.3 bounds are config and are shown as such."""
+    resolutions = run.resolutions
+    if not resolutions:
+        return []
+    lines = [
+        "#### Bounded auto-resolution (PLAN.md §8.3)",
+        "",
+        "The agent **proposes** and never posts to any real system. Each rule carries a",
+        "hard bound, checked in code; a proposal that exceeds one is listed as refused",
+        "with the bound named, never dropped.",
+        "",
+        "| Class | Rule | Bound | Applied | Refused |",
+        "|---|---|---|---|---|",
+    ]
+    seen: dict[tuple[str, str, str], list[int]] = {}
+    for item in resolutions:
+        key = (item.exception_class.value, item.rule, item.bound)
+        tally = seen.setdefault(key, [0, 0])
+        tally[0 if item.applied else 1] += 1
+    lines.extend(
+        f"| `{cls}` | {rule} | {bound} | {tally[0]} | {tally[1]} |"
+        for (cls, rule, bound), tally in seen.items()
+    )
+    lines.extend(
+        [
+            "",
+            f"Rounding budget committed this run: "
+            f"{format_minor(run.rounding_spent_minor)}.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _llm_section(run: EvaluatedRun) -> list[str]:
+    """What the model cost, and what it was refused.
+
+    PLAN.md §7.3 asks for calls per 100 records, tokens per run, actual spend
+    and the equivalent paid cost. The last is the interesting one: actual spend
+    is ₹0 by construction on the free tier, so the figure that quantifies what
+    deterministic-first buys is what the same tokens would have cost had it not
+    been.
+
+    The refusal counts are printed beside the acceptance counts on purpose. "The
+    model helped" is only a claim worth making if the same table says how often
+    it was overruled -- by a grounding gate, or by the arithmetic.
+
+    Absent entirely on a `--no-llm` run. A section of zeros for a component that
+    did not run is a false measurement, which is the rule the tier table and the
+    calibration section already follow.
+    """
+    cost = run.cost
+    if cost is None:
+        return []
+    records = run.metrics.record_count
+    return [
+        "### LLM cost and refusals (PLAN.md §7.3)",
+        "",
+        "| | |",
+        "|---|---|",
+        f"| Calls | {cost.llm_calls} |",
+        f"| Cache hits | {cost.cache_hits} ({_pct(cost.cache_hit_rate)}) |",
+        f"| Calls per 100 records | {cost.calls_per_100_records(records):.2f} |",
+        f"| Tokens | {cost.total_tokens:,} "
+        f"({cost.prompt_tokens:,} prompt, {cost.completion_tokens:,} completion) |",
+        f"| Actual cost | ₹{cost.actual_cost_inr:.2f} |",
+        f"| Equivalent paid cost | ₹{cost.equivalent_paid_cost_inr:.2f} |",
+        f"| Provider | `{cost.provider_used or 'none'}` |",
+        "",
+        "| Model output | Count |",
+        "|---|---|",
+        f"| Accepted after every gate | {run.llm_accepted} |",
+        f"| Refused: cited records it was not given | {run.llm_rejected_ungrounded} |",
+        f"| Refused: `verify_arithmetic` did not close | {run.llm_rejected_unverified} |",
+        f"| Exception prose rewritten | {run.llm_prose_rewritten} of "
+        f"{len(run.exceptions)} |",
+        "",
+        "A second identical run reaches a cache hit rate of 1.00 and makes **zero**",
+        "live calls: the responses are content-hashed to disk and committed, so the",
+        "claim is checkable rather than asserted. No number anywhere else in this",
+        "document depends on a model: the links come from the deterministic ladder,",
+        "the exception classes and amounts from Step 8's classifier, and every",
+        "LLM-proposed link that reached a decision passed `verify_arithmetic` first.",
+        "",
+    ]
+
+
 def _comparison_table(runs: Sequence[EvaluatedRun]) -> list[str]:
     lines = [
         "## System and baseline comparison (PLAN.md §9.2)",
@@ -490,6 +741,11 @@ def render_report(
         lines.extend(_link_table(run))
         lines.extend(_calibration_section(run))
         lines.extend(_tier_table(run))
+        lines.extend(_exception_queue(run))
+        lines.extend(_exception_class_table(run))
+        lines.extend(_confusion_matrix(run))
+        lines.extend(_auto_resolution(run))
+        lines.extend(_llm_section(run))
         lines.extend(_class_recall_table(run, truth))
         lines.extend(_money_table(run))
         lines.extend(_diagnostics(run))

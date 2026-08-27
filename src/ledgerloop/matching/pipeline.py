@@ -40,8 +40,10 @@ even where its links are right.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Protocol
 
 from ledgerloop.config import RunConfig
 from ledgerloop.eval.metrics import PredictedLink
@@ -59,9 +61,36 @@ from ledgerloop.models.candidates import MatchCandidate
 from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, LinkType, Tier
 from ledgerloop.models.metrics import TierContribution
+from ledgerloop.models.refs import bank_ref
 from ledgerloop.state import ReconState
 
-__all__ = ["MATCHER_DESCRIPTION", "MATCHER_NAME", "MatchRun", "run_matching"]
+__all__ = [
+    "MATCHER_DESCRIPTION",
+    "MATCHER_NAME",
+    "MatchRun",
+    "ResidualAdjudicator",
+    "run_matching",
+]
+
+
+class ResidualAdjudicator(Protocol):
+    """T5's shape, declared where the ladder can see it and nowhere else.
+
+    The LLM tier is injected rather than imported. ``matching`` must not depend
+    on :mod:`ledgerloop.llm`, because the moment it does, ``--no-llm`` stops
+    being the same code path with one branch taken and starts being a second
+    implementation -- and a second implementation is one nobody measures.
+
+    An adjudicator returns *candidates*. It cannot decide, cannot set a
+    probability, and cannot bypass ``verify_arithmetic``: everything it returns
+    goes through the same policy as T2's, and the
+    :class:`~ledgerloop.models.decisions.MatchDecision` validator refuses to
+    auto-match anything whose arithmetic did not close.
+    """
+
+    def __call__(
+        self, context: MatchContext, established: Sequence[MatchCandidate]
+    ) -> tuple[Sequence[MatchCandidate], object]: ...
 
 MATCHER_NAME = "T0-T4"
 MATCHER_DESCRIPTION = (
@@ -99,6 +128,40 @@ class MatchRun:
     passes: int = 1
     blend: BlendOutcome = field(default_factory=BlendOutcome)
     calibrated: bool = False
+    adjudication: object | None = None
+    """Whatever T5 returned beside its candidates, for the report to render.
+
+    Typed as ``object`` on purpose: the ladder does not know what an LLM outcome
+    looks like and must not learn. The CLI, which built the adjudicator, is what
+    narrows it again.
+    """
+
+    #: The indexes and residual pool the run finished with. Carried so Step 8's
+    #: classifier can see *what was left* rather than rebuilding a pool that
+    #: never went through the ladder -- a rebuilt context would show every
+    #: settlement as open and every credit as unclaimed.
+    context: MatchContext | None = None
+    #: The narration spellings T3 learned from the statement's own references.
+    #: What separates "this credit lost its reference" from "this credit is from
+    #: outside the ledger".
+    merchant_spellings: frozenset[str] = field(default_factory=frozenset)
+
+    @property
+    def out_of_scope_refs(self) -> frozenset[str]:
+        """Records the exception queue does not cover: the outgoing rows.
+
+        A debit is money leaving the account, not a payout being reconciled.
+        Exposed as a set rather than a count so the evaluator can exclude
+        exactly these records from its denominators instead of subtracting a
+        number and hoping the two agree.
+        """
+        if self.context is None:  # pragma: no cover - always set by run_matching
+            return frozenset()
+        return frozenset(
+            bank_ref(txn.txn_id).key
+            for txn in self.context.bank_txns
+            if not txn.is_credit
+        )
 
     credits_seen: int = 0
     credits_with_utr: int = 0
@@ -170,6 +233,8 @@ def _tier_contributions(
     graph: GraphOutcome,
     decisions: tuple[MatchDecision, ...],
     elapsed_by_tier: dict[Tier, int],
+    llm_candidates: tuple[MatchCandidate, ...] = (),
+    llm_ran: bool = False,
 ) -> tuple[TierContribution, ...]:
     """One row per implemented tier: proposed, auto-matched, and marginal.
 
@@ -184,8 +249,9 @@ def _tier_contributions(
     *undecided*, and the splits it exists for are exactly the ones they declined
     to consume.
     """
-    proposed: dict[Tier, int] = dict.fromkeys(IMPLEMENTED_TIERS, 0)
-    matched: dict[Tier, int] = dict.fromkeys(IMPLEMENTED_TIERS, 0)
+    tiers = (*IMPLEMENTED_TIERS, Tier.T5_LLM) if llm_ran else IMPLEMENTED_TIERS
+    proposed: dict[Tier, int] = dict.fromkeys(tiers, 0)
+    matched: dict[Tier, int] = dict.fromkeys(tiers, 0)
 
     proposed[Tier.T0_EXACT] += len(order_leg.candidates)
     for outcome in outcomes:
@@ -193,6 +259,8 @@ def _tier_contributions(
     proposed[Tier.T2_AGGREGATION] += len(aggregation.candidates)
     proposed[Tier.T3_FUZZY] += len(lexical.candidates)
     proposed[Tier.T4_GRAPH] += len(graph.candidates)
+    if llm_ran:
+        proposed[Tier.T5_LLM] += len(llm_candidates)
     for decision in decisions:
         if decision.outcome is DecisionOutcome.AUTO_MATCHED:
             matched[decision.tier] += 1
@@ -206,7 +274,7 @@ def _tier_contributions(
             llm_calls=0,
             wall_clock_ms=elapsed_by_tier.get(tier, 0),
         )
-        for tier in IMPLEMENTED_TIERS
+        for tier in tiers
     )
 
 
@@ -281,6 +349,7 @@ def run_matching(
     *,
     decided_at: datetime | None = None,
     bundle: CalibrationBundle | None = None,
+    adjudicator: ResidualAdjudicator | None = None,
 ) -> MatchRun:
     """Run the tier ladder over an ingested dataset.
 
@@ -288,6 +357,11 @@ def run_matching(
     run rather than one per decision: the ordering that matters for replay is
     the audit sequence, not the clock, and a single stamp makes a run's decision
     log byte-comparable to a rerun of the same data.
+
+    ``adjudicator`` is T5, injected by the caller that owns the model. Absent --
+    which is every ``--no-llm`` run -- the ladder is exactly the deterministic
+    T0-T4 it was at Step 8, down to the tier table having no T5 row: a zero for
+    a tier that did not run is a false measurement.
 
     ``bundle`` is the fitted blender, isotonic calibrator and threshold from
     Step 7. Without it the residual tiers keep the provisional probabilities
@@ -375,12 +449,34 @@ def run_matching(
         if len(residual) == before:
             break
 
+    # T5 last, and only over what everything before it left. It sees the
+    # established candidates so its evidence packs describe the real residual,
+    # and its output rejoins the ordinary flow: scored by the blender if one is
+    # fitted, then routed by the same policy as every other tier.
+    adjudication: object | None = None
+    t5_ms = 0
+    llm_candidates: tuple[MatchCandidate, ...] = ()
+    if adjudicator is not None:
+        started = time.perf_counter_ns()
+        established = (
+            *order_leg.candidates,
+            *t0_bank.candidates,
+            *t1_bank.candidates,
+            *residual,
+        )
+        proposed, adjudication = adjudicator(context, established)
+        llm_candidates = tuple(proposed)
+        if bundle is not None:
+            apply_bundle(llm_candidates, bundle)
+        t5_ms = (time.perf_counter_ns() - started) // 1_000_000
+
     bank_legs = (t0_bank, t1_bank)
     candidates: list[MatchCandidate] = [
         *order_leg.candidates,
         *t0_bank.candidates,
         *t1_bank.candidates,
         *residual,
+        *llm_candidates,
     ]
     # One authoritative pass over every candidate, T0 and T1 included, so the
     # reported counters describe the whole run rather than the residual passes.
@@ -418,7 +514,10 @@ def run_matching(
                 Tier.T2_AGGREGATION: t2_ms,
                 Tier.T3_FUZZY: t3_ms,
                 Tier.T4_GRAPH: t4_ms,
+                Tier.T5_LLM: t5_ms,
             },
+            llm_candidates=llm_candidates,
+            llm_ran=adjudicator is not None,
         ),
         wall_clock_ms=int(elapsed_ms),
         order_leg=order_leg,
@@ -429,6 +528,11 @@ def run_matching(
         passes=passes,
         blend=blend,
         calibrated=bundle is not None,
+        adjudication=adjudication,
+        context=context,
+        merchant_spellings=frozenset(
+            spelling for profile in profiles.values() for spelling in profile.spellings
+        ),
         credits_seen=len(context.credits),
         credits_with_utr=context.credits_with_utr,
         settlements_seen=len(context.settlements),

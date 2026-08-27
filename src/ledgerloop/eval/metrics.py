@@ -50,8 +50,15 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from ledgerloop.models.base import FrozenLedgerModel, MinorUnits
-from ledgerloop.models.enums import AnomalyClass, LinkType, RecordType
+from ledgerloop.models.enums import (
+    AnomalyClass,
+    ExceptionClass,
+    ExpectedStatus,
+    LinkType,
+    RecordType,
+)
 from ledgerloop.models.metrics import LinkMetrics, RunMetrics, TierContribution
+from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.models.refs import RecordRef
 from ledgerloop.models.truth import GroundTruth, TruthPair
 from ledgerloop.money import sum_minor
@@ -59,14 +66,21 @@ from ledgerloop.stats import Z_95, wilson_interval
 
 __all__ = [
     "EVALUATED_RECORD_TYPES",
+    "EXCEPTION_RECORD_TYPES",
     "Z_95",
+    "ExceptionCoverage",
     "LinkConfusion",
     "MatchRateResult",
     "MoneyView",
     "PredictedLink",
     "confusion",
+    "covered_refs",
     "evaluate",
     "evaluation_links_by_class",
+    "exception_confusion",
+    "exception_coverage",
+    "exception_impact_minor",
+    "exceptions_by_class",
     "link_metrics",
     "match_rate",
     "money_view",
@@ -331,6 +345,171 @@ def money_view(predicted_pairs: Iterable[TruthPair], truth: GroundTruth) -> Mone
     )
 
 
+# ---------------------------------------------------------------------------
+# Exception metrics (Step 8)
+#
+# A different unit from everything above. Precision and recall over links ask
+# "did the system find the money?"; these ask "did the system *say something
+# useful* about the money it could not find?", and the answer is a property of
+# records, not of pairs.
+# ---------------------------------------------------------------------------
+
+#: Record types the exception queue is accountable for.
+#:
+#: The same restriction the match rate uses, plus settlements: a payout that
+#: never arrived is exactly the kind of item a controller expects in the queue,
+#: even though no ``PAYMENT_CREDITED_AS`` link runs through it.
+EXCEPTION_RECORD_TYPES = frozenset(
+    {RecordType.ORDER, RecordType.PAYMENT, RecordType.SETTLEMENT, RecordType.BANK_TXN}
+)
+
+
+@dataclass(frozen=True)
+class ExceptionCoverage:
+    """Which records the queue accounted for, and which it left silent.
+
+    Two denominators, kept apart on purpose:
+
+    * **``expected``** -- records ground truth calls ``EXCEPTION``: resolvable
+      items the system failed to resolve. Missing one of these is a real failure
+      and it is what :attr:`recall` measures.
+    * **``unmatchable``** -- records ground truth calls ``UNMATCHABLE``. Raising
+      an exception for one is the *correct* behaviour (it is how the honest
+      floor gets reported), but crediting it inside the headline recall would
+      let a system inflate the number by describing items nobody could resolve.
+      It is reported as its own line.
+    """
+
+    expected: frozenset[str]
+    covered_expected: frozenset[str]
+    unmatchable: frozenset[str]
+    covered_unmatchable: frozenset[str]
+    raised: int = 0
+    out_of_scope: int = 0
+    """Records excluded from both denominators, counted so the exclusion is visible."""
+
+    @property
+    def recall(self) -> float:
+        return _ratio(len(self.covered_expected), len(self.expected))
+
+    @property
+    def missed(self) -> frozenset[str]:
+        return self.expected - self.covered_expected
+
+    @property
+    def unmatchable_recall(self) -> float:
+        return _ratio(len(self.covered_unmatchable), len(self.unmatchable))
+
+
+def covered_refs(exceptions: Iterable[ReconException]) -> frozenset[str]:
+    """Every record key any exception in the queue names.
+
+    A record is covered when an exception *mentions* it, not only when it is the
+    subject. A chargeback exception whose subject is the payment and whose chain
+    names the settlement and the order has told the controller about all three,
+    and a metric that only counted subjects would report two of them as silence.
+    """
+    return frozenset(
+        ref.key for exception in exceptions for ref in exception.involved_refs
+    )
+
+
+def exception_coverage(
+    exceptions: Sequence[ReconException],
+    truth: GroundTruth,
+    *,
+    record_types: AbstractSet[RecordType] = EXCEPTION_RECORD_TYPES,
+    out_of_scope: AbstractSet[str] = frozenset(),
+) -> ExceptionCoverage:
+    """How much of what should have been reported actually was.
+
+    ``out_of_scope`` carries one honest exclusion. A bank **debit** is money
+    leaving the account, not a payout this system reconciles, and ground truth
+    marks every debit ``UNMATCHABLE`` because no settlement claims it. Listing
+    thirty-four outgoing rows in a controller's queue would be noise, so they sit
+    outside the unit -- and the count is reported rather than the rows being
+    dropped quietly. Passing nothing includes them, which is the conservative
+    default: an exclusion has to be asked for.
+    """
+    covered = covered_refs(exceptions)
+    expected: set[str] = set()
+    unmatchable: set[str] = set()
+    ignored = 0
+    for record in truth.records:
+        if record.record_ref.record_type not in record_types:
+            continue
+        if record.record_ref.key in out_of_scope:
+            ignored += 1
+            continue
+        if record.expected_status is ExpectedStatus.EXCEPTION:
+            expected.add(record.record_ref.key)
+        elif record.expected_status is ExpectedStatus.UNMATCHABLE:
+            unmatchable.add(record.record_ref.key)
+    return ExceptionCoverage(
+        expected=frozenset(expected),
+        covered_expected=frozenset(expected & covered),
+        unmatchable=frozenset(unmatchable),
+        covered_unmatchable=frozenset(unmatchable & covered),
+        raised=len(exceptions),
+        out_of_scope=ignored,
+    )
+
+
+def exception_confusion(
+    exceptions: Sequence[ReconException], truth: GroundTruth
+) -> dict[str, dict[str, int]]:
+    """True anomaly class -> predicted exception class -> count.
+
+    **Rectangular, not square**, and that is the point (ARCHITECTURE.md 6,
+    decision 5). Eleven anomaly classes describe what the generator did; thirteen
+    exception classes describe what the system concluded; the two vocabularies
+    answer different questions and the mapping between them is many-to-many. A
+    square matrix would be an identity nobody measured.
+
+    An exception is attributed to every anomaly touching any record it names, so
+    -- as with the per-class recall table -- the rows do not partition the queue
+    and the report says so.
+    """
+    verdicts = truth.verdict_by_ref
+    matrix: dict[str, dict[str, int]] = {}
+    for exception in exceptions:
+        touched = {
+            verdicts[ref.key].anomaly_class
+            for ref in exception.involved_refs
+            if ref.key in verdicts
+        }
+        for anomaly in touched or {AnomalyClass.CLEAN}:
+            row = matrix.setdefault(anomaly.value, {})
+            predicted = exception.exception_class.value
+            row[predicted] = row.get(predicted, 0) + 1
+    return {
+        anomaly.value: dict(sorted(matrix[anomaly.value].items()))
+        for anomaly in AnomalyClass
+        if anomaly.value in matrix
+    }
+
+
+def exceptions_by_class(
+    exceptions: Sequence[ReconException],
+) -> dict[ExceptionClass, int]:
+    """Queue size per class, in taxonomy order."""
+    counts: dict[ExceptionClass, int] = {}
+    for exception in exceptions:
+        counts[exception.exception_class] = counts.get(exception.exception_class, 0) + 1
+    return {
+        exception_class: counts[exception_class]
+        for exception_class in ExceptionClass
+        if exception_class in counts
+    }
+
+
+def exception_impact_minor(exceptions: Sequence[ReconException]) -> int:
+    """Total money the queue is about, through the money gate."""
+    return sum_minor(
+        (exception.impact_minor for exception in exceptions), field="exception_impact"
+    )
+
+
 def evaluate(
     predictions: Sequence[PredictedLink],
     truth: GroundTruth,
@@ -338,6 +517,8 @@ def evaluate(
     run_id: str,
     wall_clock_ms: int = 0,
     tier_contributions: Sequence[TierContribution] = (),
+    exceptions: Sequence[ReconException] = (),
+    out_of_scope_refs: AbstractSet[str] = frozenset(),
 ) -> RunMetrics:
     """Score one system's predictions against one dataset's truth.
 
@@ -349,6 +530,10 @@ def evaluate(
     decision policy. It defaults to empty because a baseline has no tiers, and
     an empty tuple renders as an absent section rather than as a table of
     zeros -- a zero for an unbuilt component is a false measurement.
+
+    ``exceptions`` is the queue Step 8's classifier produced. Same rule: a
+    baseline has no exception classifier, so the empty default renders as an
+    absent section and never as a recall of zero.
     """
     pairs = [prediction.pair for prediction in predictions]
     truth_pairs = truth.evaluation_pairs
@@ -359,6 +544,7 @@ def evaluate(
 
     links = link_metrics(pairs, truth_pairs, asserted_amount_by_pair=asserted)
     coverage = match_rate(pairs, truth)
+    queue = exception_coverage(exceptions, truth, out_of_scope=out_of_scope_refs)
     money = money_view(pairs, truth)
     record_count = len(truth.records)
 
@@ -368,6 +554,9 @@ def evaluate(
         record_count=record_count,
         auto_match_precision=links.precision,
         match_rate=coverage.rate,
+        exception_recall=queue.recall,
+        exceptions_by_class=exceptions_by_class(exceptions),
+        exception_confusion=exception_confusion(exceptions, truth),
         link_metrics=links,
         recall_by_anomaly_class=recall_by_anomaly_class(pairs, truth),
         unmatchable_count=len(truth.unmatchable_refs),

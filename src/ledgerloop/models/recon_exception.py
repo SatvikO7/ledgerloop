@@ -49,8 +49,13 @@ class ReconException(FrozenLedgerModel):
     exception_class: ExceptionClass
     severity: Severity
     impact_minor: MinorUnits = Field(
-        description="Money at stake. The queue's sort key -- a controller cares "
-        "about one ₹4L exception, not two hundred one-paise drifts."
+        ge=0,
+        description="Money at stake, as a magnitude. The queue's sort key -- a "
+        "controller cares about one ₹4L exception, not two hundred one-paise "
+        "drifts. Non-negative because a negative sort key would put the worst "
+        "item last: a settlement can declare a negative net (claw-backs "
+        "exceeding its payments) and the amount at risk is still what is at "
+        "risk. Found by a property test, not by inspection.",
     )
     involved_refs: tuple[RecordRef, ...] = Field(min_length=1)
     evidence: tuple[Evidence, ...] = ()
