@@ -15,10 +15,28 @@ run to run. They are confined to a single labelled block that says so, rather
 than being dropped (which would lose a required metric) or left unmarked (which
 would leave a reader unable to tell a real regression from scheduler noise).
 
-The document reports what it has and says so about what it does not. Rows for
-metrics that no implemented step produces yet -- exception recall, calibration,
-the B1/B2/B3 baselines -- are rendered as pending with the step that will fill
-them, never as a zero. A zero for an unbuilt component is a false measurement.
+The document reports what it has and says so about what it does not. A section
+whose input is absent -- no calibration bundle, no sweep artefact, an LLM
+baseline that could not reach a model -- renders as *absent* or as an explicit
+"not run", never as a table of zeros. A zero for something that did not run is
+a false measurement, and it is the single most common way an evaluation report
+misleads.
+
+WHAT STEP 10 ADDED
+------------------
+Four sections, each fed by a serialised artefact rather than by a computation
+this module performs: the four-system baseline comparison (PLAN.md 9.2), the
+six-row ablation (9.3), the multi-seed table and the difficulty response (9.4).
+They arrive as artefacts because two of them cost real work -- the ablation is
+thirty pipeline runs and the LLM baseline touches a network -- and regenerating
+a document must not repeat either.
+
+The models come from :mod:`ledgerloop.eval.artifacts` rather than from the
+modules that produce them, and that import is load-bearing: the producers import
+the run harness, which imports ``llm``, and ``matching`` imports ``eval`` for one
+contract type. Importing a runner here would close that into a cycle and give
+``matching`` a transitive dependency on ``llm`` -- through a document renderer.
+A report needs the *shape* of a result, never the machinery that produced one.
 """
 
 from __future__ import annotations
@@ -28,12 +46,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from ledgerloop.eval.artifacts import (
+    AblationArtifact,
+    LLMBaselineArtifact,
+    SweepArtifact,
+    SweepGroup,
+)
 from ledgerloop.eval.metrics import (
     ExceptionCoverage,
     PredictedLink,
     evaluation_links_by_class,
 )
 from ledgerloop.eval.reliability import CalibrationEvaluation
+from ledgerloop.eval.summary import Aggregate
 from ledgerloop.eval.truth_io import DatasetManifest
 from ledgerloop.matching.calibration import ReliabilityDiagram
 from ledgerloop.models.metrics import CostLedger, RunMetrics
@@ -42,15 +67,7 @@ from ledgerloop.models.resolution import AutoResolution
 from ledgerloop.models.truth import GroundTruth
 from ledgerloop.money import format_minor
 
-__all__ = ["PENDING_BASELINES", "EvaluatedRun", "ScoredRun", "render_report", "write_report"]
-
-#: Baselines PLAN.md §9.2 specifies that no implemented step produces yet.
-#: Listed so the table shows the shape of the finished comparison rather than
-#: implying what is built so far is the whole story.
-PENDING_BASELINES: tuple[tuple[str, str, str], ...] = (
-    ("B1", "Exact + fuzzy -- the typical hackathon submission", "Step 10"),
-    ("B2", "LLM-only, run on the 60-record dev split", "Step 10"),
-)
+__all__ = ["EvaluatedRun", "ScoredRun", "render_report", "write_report"]
 
 _PENDING = "_pending_"
 
@@ -126,6 +143,42 @@ class EvaluatedRun:
     llm_rejected_unverified: int = 0
     llm_prose_rewritten: int = 0
 
+    candidates_proposed: int = 0
+    """Candidate yield on the evaluation unit, before the decision policy ruled.
+
+    Zero for a baseline, which has no proposal stage separate from its output;
+    :func:`_comparison_table` renders that case as the asserted-link count with
+    a note rather than as a yield of zero.
+    """
+
+    auto_matched: int = 0
+    """Evaluation-unit links the run committed. Equals TP + FP by construction."""
+
+    scope: str = ""
+    """A note on what this row was measured over, when it is not the main split.
+
+    B2 runs on `dev` rather than `test` (PLAN.md §9.2), and a comparison table
+    whose rows come from different corpora has to say so in the row itself --
+    a footnote is where that kind of qualification goes to be missed.
+    """
+
+    review_queue: int = 0
+    """Evaluation-unit links the policy deliberately sent to a human.
+
+    Reported rather than folded into the false negatives, because they are a
+    different thing: a link the system declined to commit and *said so* is the
+    system working, and a link it never found is the system missing.
+    """
+
+    negatives: tuple[tuple[str, str, int], ...] = ()
+    """``(label, what it means, count)`` -- where the recall that is missing went.
+
+    A recall of 0.44 is a number; "99 links lost to A07, 84 to contested
+    duplicates nothing can disambiguate" is a finding. PLAN.md D8 asks for the
+    second, so the counters the tiers already keep are surfaced here instead of
+    staying in a run object nobody reads.
+    """
+
 
 def _pct(value: float) -> str:
     return f"{value * 100:.2f}%"
@@ -185,6 +238,11 @@ def _headline(run: EvaluatedRun) -> list[str]:
         f"## {run.system.name} -- {run.system.description}",
         "",
         "### The headline three (PLAN.md §9.1)",
+        "",
+        "**Single seed.** Every figure in this section and the ones below it is one",
+        "run over the corpus named at the top of the document. The mean ± standard",
+        "deviation across seeds is in the multi-seed section, and it is the figure any",
+        "claim should quote: a single run's number is noise (PLAN.md §9.4).",
         "",
         "| Metric | Value | Target |",
         "|---|---|---|",
@@ -251,6 +309,51 @@ def _money_table(run: EvaluatedRun) -> list[str]:
     ]
 
 
+def _negative_analysis(run: EvaluatedRun) -> list[str]:
+    """Where the missing recall went, and what the system said instead.
+
+    PLAN.md D8 and §9.1: publish the classes that do badly. A recall figure with
+    no account of its complement invites the reader to assume the misses are
+    uniform noise; they are not, and every counter below is one the tiers were
+    already keeping.
+
+    The review queue is listed separately from the false negatives on purpose.
+    A link the policy declined to commit *and flagged* is the precision-first
+    design working as specified; a link nothing ever found is a gap. Adding them
+    together would hide which of the two this system has.
+    """
+    links = run.metrics.link_metrics
+    if links is None or not run.negatives:
+        return []
+    lines = [
+        "### Honest negative analysis (PLAN.md §9.1, D8)",
+        "",
+        f"{links.false_negatives} evaluation links were not asserted. Where they went:",
+        "",
+        "| Cause | Count | What it means |",
+        "|---|---|---|",
+    ]
+    lines.extend(
+        f"| {label} | {count} | {meaning} |" for label, meaning, count in run.negatives
+    )
+    lines.extend(
+        [
+            "",
+            "The counts do not partition the misses: a settlement can be both contested",
+            "and left unsolved, and one unmatched settlement accounts for as many links",
+            "as it has payments. They are the reasons the ladder recorded, not a",
+            "decomposition of the total.",
+            "",
+            f"**{run.review_queue}** evaluation-unit links were routed to a human rather",
+            "than committed. That is a different outcome from a miss and is counted",
+            "separately: a link the policy declined *and flagged* is the precision-first",
+            "design working; a link nothing found is a gap.",
+            "",
+        ]
+    )
+    return lines
+
+
 def _class_recall_table(run: EvaluatedRun, truth: GroundTruth) -> list[str]:
     rows = run.metrics.recall_by_anomaly_class
     if not rows:  # pragma: no cover - every dataset carries labelled links
@@ -276,7 +379,18 @@ def _class_recall_table(run: EvaluatedRun, truth: GroundTruth) -> list[str]:
 
 
 def _diagnostics(run: EvaluatedRun) -> list[str]:
+    """Why the row scores the way it does, and the one block that holds timings.
+
+    Every measured timing in the document is here, and nothing else in the
+    document is measured with a clock. That is what lets a reader diff two runs
+    and see a change in the *system*: the only lines that can move are the ones
+    under a heading that says they move.
+    """
     system = run.system
+    per_tier = [
+        f"| {row.tier.name} | {row.wall_clock_ms} ms |"
+        for row in run.metrics.tier_contributions
+    ]
     return [
         "### Why it scores the way it does",
         "",
@@ -301,6 +415,7 @@ def _diagnostics(run: EvaluatedRun) -> list[str]:
         "|---|---|",
         f"| Wall clock | {system.wall_clock_ms} ms |",
         f"| Throughput | {run.metrics.records_per_second:,.0f} records/sec |",
+        *per_tier,
         "",
     ]
 
@@ -315,7 +430,15 @@ def _tier_table(run: EvaluatedRun) -> list[str]:
     cautious policy hide behind an eager proposer.
 
     Tiers no implemented step produces are absent rather than shown at zero. A
-    zero for an unbuilt component is a false measurement.
+    zero for an unbuilt component is a false measurement -- and from Step 10 a
+    tier the ablation *switched off* is absent for the same reason.
+
+    **Per-tier wall clock is not here.** It is a measured timing, and this
+    module's contract is that every such figure lives in the single labelled
+    ``#### Measured timings`` block. A stopwatch reading in an otherwise
+    deterministic table would make a diff between two runs show scheduler noise
+    rather than a change in the system, which is exactly what the no-timestamp
+    rule exists to prevent.
     """
     rows = run.metrics.tier_contributions
     if not rows:
@@ -324,12 +447,12 @@ def _tier_table(run: EvaluatedRun) -> list[str]:
     lines = [
         "### Tier contribution",
         "",
-        "| Tier | Candidates proposed | Auto-matched | Marginal | LLM calls | Wall clock |",
-        "|---|---|---|---|---|---|",
+        "| Tier | Candidates proposed | Auto-matched | Marginal | LLM calls |",
+        "|---|---|---|---|---|",
     ]
     lines.extend(
         f"| `{row.tier.name}` | {row.candidates_proposed} | {row.auto_matched} | "
-        f"{row.marginal_auto_matched} | {row.llm_calls} | {row.wall_clock_ms} ms |"
+        f"{row.marginal_auto_matched} | {row.llm_calls} |"
         for row in rows
     )
     lines.extend(
@@ -697,45 +820,524 @@ def _llm_section(run: EvaluatedRun) -> list[str]:
     ]
 
 
-def _comparison_table(runs: Sequence[EvaluatedRun]) -> list[str]:
+def _yield_cells(run: EvaluatedRun) -> tuple[str, str]:
+    """Candidate yield and auto-matched, or the baseline's honest equivalent.
+
+    A baseline has no proposal stage distinct from its output: every link it
+    finds, it asserts. Rendering a yield of zero for that would read as "found
+    nothing"; rendering the asserted count with a marker says what is true --
+    the two numbers coincide because there is no policy between them.
+    """
+    links = run.metrics.link_metrics
+    asserted = (links.true_positives + links.false_positives) if links else 0
+    if run.candidates_proposed == 0 and run.auto_matched == 0:
+        return (f"{asserted} †", str(asserted))
+    return (str(run.candidates_proposed), str(run.auto_matched))
+
+
+def _comparison_row(run: EvaluatedRun) -> str:
+    metrics = run.metrics
+    links = metrics.link_metrics
+    predicted = (links.true_positives + links.false_positives) if links else 0
+    actual = (links.true_positives + links.false_negatives) if links else 0
+    proposed, matched = _yield_cells(run)
+    exception_recall = (
+        _pct(metrics.exception_recall) if metrics.exceptions_by_class else "n/a"
+    )
+    # PLAN.md 9.2 numbers the four systems B0-B3. The ladder's own name says
+    # which tiers ran, which is the more useful label everywhere else in this
+    # document -- so the comparison table carries both rather than choosing.
+    name = run.system.name
+    label = name if name.startswith("B") else f"B3 (`{name}`)"
+    return (
+        f"| {label} | {run.scope or '`test`'} | {proposed} | {matched} | "
+        f"{_ratio_cell(metrics.auto_match_precision, predicted)} | "
+        f"{_ratio_cell(links.recall if links else 0.0, actual)} | "
+        f"{_pct(metrics.match_rate)} | {links.false_positives if links else 0} | "
+        f"{format_minor(links.false_positive_cost_minor) if links else '--'} | "
+        f"{exception_recall} |"
+    )
+
+
+def _b2_row(artifact: LLMBaselineArtifact | None) -> str:
+    """B2 out of its saved artefact. Never re-run to render a document.
+
+    A row is emitted even with no artefact at all, because the table's job is to
+    show the shape of PLAN.md 9.2's comparison. What it must never do is fill
+    that row with zeros: an absent measurement renders as pending, and the
+    reader can tell the two cases apart.
+    """
+    if artifact is None:
+        return (
+            f"| B2 | `dev` | {_PENDING} | {_PENDING} | {_PENDING} | {_PENDING} | "
+            f"{_PENDING} | {_PENDING} | {_PENDING} | n/a |"
+        )
+    marker = " §" if artifact.is_standin else ""
+    if not artifact.ran:
+        return (
+            f"| B2 | `{artifact.split or 'dev'}` | {_PENDING} | {_PENDING} | "
+            f"{_PENDING} | {_PENDING} | {_PENDING} | {_PENDING} | {_PENDING} | n/a |"
+        )
+    return (
+        f"| B2{marker} | `{artifact.split}` ‡ | {artifact.links_asserted} † | "
+        f"{artifact.links_asserted} | "
+        f"{_ratio_cell(artifact.precision, artifact.true_positives + artifact.false_positives)} | "
+        f"{_ratio_cell(artifact.recall, artifact.true_positives + artifact.false_negatives)} | "
+        f"{_pct(artifact.match_rate)} | {artifact.false_positives} | "
+        f"{format_minor(artifact.false_positive_cost_minor)} | n/a |"
+    )
+
+
+def _comparison_table(
+    runs: Sequence[EvaluatedRun], llm_baseline: LLMBaselineArtifact | None = None
+) -> list[str]:
+    """PLAN.md §9.2's table: the four systems on the same ground truth.
+
+    Candidate yield and auto-match rate sit in adjacent columns because they
+    answer different questions -- reach and conviction -- and a single figure
+    lets an over-eager proposal stage hide behind a cautious policy, or the
+    reverse. Precision and recall likewise: a row that trades recall for
+    precision is making the trade this project argues for, and the
+    false-positive column is that argument in rupees.
+    """
     lines = [
         "## System and baseline comparison (PLAN.md §9.2)",
         "",
-        "Precision and match rate are orthogonal by design. A row that trades match",
-        "rate for precision is making the trade this project argues for: in finance ops a",
-        "wrong auto-match costs far more than a human reviewing an extra item, and the",
-        "false-positive cost column is that argument in rupees.",
+        "All four systems, scored against the same link-level ground truth by the same",
+        "`evaluate()` call. Precision and match rate are orthogonal by design: in finance",
+        "ops a wrong auto-match costs far more than a human reviewing an extra item, and",
+        "the false-positive cost column is that argument in rupees.",
         "",
-        "| # | System | Precision | Match rate | FP cost |",
-        "|---|---|---|---|---|",
+        "| # | Split | Candidate yield | Auto-matched | Precision | Recall | "
+        "Match rate | FP | FP cost | Exception recall |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for run in runs:
-        links = run.metrics.link_metrics
-        predicted = (links.true_positives + links.false_positives) if links else 0
-        cost = format_minor(links.false_positive_cost_minor) if links else "--"
-        lines.append(
-            f"| {run.system.name} | {run.system.description} | "
-            f"{_ratio_cell(run.metrics.auto_match_precision, predicted)} | "
-            f"{_pct(run.metrics.match_rate)} | {cost} |"
+    ordered = sorted(runs, key=lambda run: run.system.name)
+    baselines = [run for run in ordered if run.system.name.startswith("B")]
+    systems = [run for run in ordered if not run.system.name.startswith("B")]
+    lines.extend(_comparison_row(run) for run in baselines)
+    lines.append(_b2_row(llm_baseline))
+    lines.extend(_comparison_row(run) for run in systems)
+    lines.extend(
+        [
+            "",
+            "† A baseline has no proposal stage separate from its output: every link it",
+            "finds, it asserts. Yield and conviction coincide because there is no decision",
+            "policy between them, which is exactly what the two columns exist to show.",
+            "",
+        ]
+    )
+    if llm_baseline is not None and llm_baseline.ran:
+        lines.extend(
+            [
+                "‡ B2 is measured on the **60-order `dev` split**, not on `test`. PLAN.md",
+                "§9.2 fixes that scope: an LLM-only baseline sends the corpus rather than its",
+                "residual, so its token cost scales with the whole dataset and running it on",
+                "`test` would spend a meaningful slice of a day's free-tier quota to",
+                "demonstrate the same point. Its row is therefore **not** directly comparable",
+                "to the rows above it, and the difference is stated here rather than left in",
+                "a footnote nobody reads.",
+                "",
+            ]
+        )
+    if llm_baseline is not None and llm_baseline.is_standin:
+        lines.extend(
+            [
+                "§ **B2 was not answered by a language model.** There is no provider key",
+                "in this environment, so its prompts were answered by the documented",
+                "stand-in reasoner in `eval/offline_provider.py`, which reads the prompt",
+                "text and nothing else. Its **cost, cache, call and failure figures are",
+                "measured machinery** -- the same prompt, cache, budget, schema and ledger a",
+                "live provider goes through. Its **precision and recall are a property of",
+                "that rule and are not a claim about any model.** What the row does",
+                "demonstrate is architectural and reasoner-independent: output asserted",
+                "with no `verify_arithmetic` behind it is asserted wrong as readily as",
+                "right, and the token cost scales with the corpus rather than the residual.",
+                "",
+            ]
         )
     lines.extend(
-        f"| {name} | {description} | {_PENDING} | {_PENDING} | {_PENDING} ({step}) |"
-        for name, description, step in PENDING_BASELINES
+        [
+            "The systems' descriptions:",
+            "",
+        ]
+    )
+    lines.extend(
+        f"- **{run.system.name if run.system.name.startswith('B') else 'B3'}** -- "
+        f"{run.system.description}"
+        for run in [*baselines, *systems]
+    )
+    lines.append(
+        "- **B2** -- LLM-only: the whole corpus in the prompt, the model's answer "
+        "asserted without a decision policy, a grounding gate or `verify_arithmetic`."
     )
     lines.append("")
     return lines
 
 
+def _llm_baseline_section(artifact: LLMBaselineArtifact | None) -> list[str]:
+    """What B2 cost, what it got wrong, and how it compares on identical data.
+
+    Absent entirely when B2 did not run. PLAN.md §9.2 predicts that B2 is worse
+    on precision and far more expensive; predicting is not measuring, so the
+    section prints the measurement or prints that there is none.
+    """
+    if artifact is None:
+        return []
+    lines = [
+        "## B2 -- the LLM-only baseline (PLAN.md §9.2)",
+        "",
+        "The \"why not just an LLM\" answer, run without any of the safeguards the",
+        "production system applies to the same model: no decision policy, no grounding",
+        "gate, no `verify_arithmetic`, no calibration. Whatever it returns is asserted.",
+        "",
+    ]
+    if not artifact.ran:
+        lines.extend(
+            [
+                f"**Not run.** {artifact.reason}",
+                "",
+                "Nothing is reported in its place. A precision of zero for a baseline that",
+                "made no attempt would be a false measurement, which is the rule every other",
+                "absent section in this document follows.",
+                "",
+            ]
+        )
+        return lines
+
+    if artifact.is_standin:
+        lines.extend(
+            [
+                "> **Answered by a stand-in, not by a model.** No provider key is available",
+                "> here, so `eval/offline_provider.py` answered these prompts by reading the",
+                "> prompt text and taking, for each settlement group, the bank credit whose",
+                "> amount is nearest the group's **gross** total -- argmax, no uniqueness",
+                "> check, no fee model. That rule is stated in full in the module docstring.",
+                ">",
+                "> Everything in the cost table below is measured: the same prompt, the same",
+                "> content-hash cache, the same budget, the same schema validation, the same",
+                "> ledger. Everything in the accuracy row above is a property of that rule.",
+                ">",
+                "> The invented-id counters read zero because the stand-in cannot invent an",
+                "> id. A real model can, which is why the counters exist -- a zero from a",
+                "> reasoner incapable of the failure is not evidence that the failure does",
+                "> not happen.",
+                "",
+            ]
+        )
+    multiple = artifact.token_multiple
+    lines.extend(
+        [
+            "| | |",
+            "|---|---|",
+            f"| Split | `{artifact.split}` (seed {artifact.seed}, "
+            f"{artifact.difficulty}) |",
+            f"| Payments offered | {artifact.payments_offered} |",
+            f"| Bank credits offered (in every prompt) | {artifact.credits_offered} |",
+            f"| Calls attempted | {artifact.calls_attempted} |",
+            f"| ...that produced no usable answer | {artifact.calls_failed} |",
+            f"| Links returned | {artifact.links_returned} |",
+            f"| ...repeated across batches | {artifact.links_duplicated} |",
+            f"| ...asserted after de-duplication | {artifact.links_asserted} |",
+            f"| **Payment ids that exist in no source** | "
+            f"**{artifact.unknown_payment_ids}** |",
+            f"| **Bank txn ids that exist in no source** | "
+            f"**{artifact.unknown_bank_txn_ids}** |",
+            "",
+            "The last two rows are the grounding gate's absence, measured. In the",
+            "production system an id the model invented is refused by",
+            "`llm/gates.py` and the whole extraction is discarded; here it is asserted and",
+            "scored, which is why it appears as a false positive rather than as a warning.",
+            "",
+            "### What it cost",
+            "",
+            "| | B2 | LedgerLoop, same corpus |",
+            "|---|---|---|",
+            f"| Calls | {artifact.cost.llm_calls} | "
+            f"{artifact.system_cost.llm_calls if artifact.system_ran else '--'} |",
+            f"| Cache hits | {artifact.cost.cache_hits} "
+            f"({_pct(artifact.cost.cache_hit_rate)}) | "
+            f"{artifact.system_cost.cache_hits if artifact.system_ran else '--'} |",
+            f"| Tokens | {artifact.cost.total_tokens:,} | "
+            f"{format(artifact.system_cost.total_tokens, ',') if artifact.system_ran else '--'} |",
+            f"| Actual cost | ₹{artifact.cost.actual_cost_inr:.2f} | "
+            f"₹{artifact.system_cost.actual_cost_inr:.2f} |",
+            f"| Equivalent paid cost | ₹{artifact.cost.equivalent_paid_cost_inr:.2f} | "
+            f"₹{artifact.system_cost.equivalent_paid_cost_inr:.2f} |",
+            "",
+        ]
+    )
+    if artifact.system_ran and multiple > 0:
+        lines.extend(
+            [
+                f"**B2 spends {multiple:.1f}x the tokens** of the deterministic-first",
+                "pipeline on the identical corpus. Both halves are measured, not estimated:",
+                "the same dataset, the same provider, the same model, the same cache.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "**LedgerLoop reconciled the same corpus with zero LLM calls and zero",
+                f"tokens.** B2 spent {artifact.cost.total_tokens:,}. The ratio is therefore",
+                "not a multiple at all -- its denominator is zero -- and the honest statement",
+                "is the one the deterministic-first design was arguing for: on this corpus",
+                "the tier ladder needed no model, so every token in the left-hand column is",
+                "a token the right-hand column did not have to spend.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "The figures above are the **cold** cost: `make eval` empties B2's cache",
+            "before running it, because a warm cache reports zero calls and zero tokens and",
+            "that is true of any rerun. Rerunning the identical command against the warm",
+            "cache does reach a hit rate of 1.00 with **zero** live calls -- the same",
+            "guarantee the production path makes, asserted by a test rather than by this",
+            "sentence.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _rendered(value: Aggregate, *, digits: int = 4) -> str:
+    return value.rendered(digits=digits)
+
+
+def _ablation_section(artifact: AblationArtifact | None) -> list[str]:
+    """PLAN.md §9.3: the marginal contribution of each tier, priced."""
+    if artifact is None:
+        return []
+    lines = [
+        "## Ablation -- what each tier adds (PLAN.md §9.3)",
+        "",
+        f"Every prefix of the ladder, run over **{len(artifact.seeds)} seed(s)** of",
+        f"`{artifact.split}` at **{artifact.difficulty}** difficulty. Mean ± sample",
+        "standard deviation across seeds.",
+        "",
+        "The rows are **re-run, not subtracted**. Each tier consumes from a shared pool,",
+        "so switching T1 off does not remove T1's matches -- it leaves T1's settlements",
+        "undecided and T2 then sees them. Reading an ablation off one full run's tier",
+        "counters would describe an arithmetic identity rather than a system.",
+        "",
+        "| Ladder | Precision | Recall | Match rate | Δ recall | Candidate yield | "
+        "Auto-matched | FP | FP cost | LLM calls | Tokens | Equiv. ₹ |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for index, row in enumerate(artifact.rows):
+        delta = artifact.marginal(index, "recall")
+        lines.append(
+            f"| `{row.label}` | {_rendered(row.precision)} | {_rendered(row.recall)} | "
+            f"{_rendered(row.match_rate)} | {delta:+.4f} | "
+            f"{_rendered(row.candidate_yield, digits=1)} | "
+            f"{_rendered(row.auto_matched, digits=1)} | "
+            f"{_rendered(row.false_positives, digits=1)} | "
+            f"{format_minor(round(row.false_positive_cost_minor.mean))} | "
+            f"{_rendered(row.llm_calls, digits=1)} | "
+            f"{_rendered(row.llm_tokens, digits=0)} | "
+            f"{row.equivalent_paid_cost_inr.mean:.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "`Δ recall` is this row's mean recall minus the row above it: what the tier",
+            "added over the ladder without it. The first row is measured against doing",
+            "nothing.",
+            "",
+        ]
+    )
+    if artifact.tuning_hash:
+        lines.extend(
+            [
+                f"Every row ran tuning configuration `{artifact.tuning_hash}`: the same",
+                "tolerances, lexical gates, graph parameters, thresholds, severity bands and",
+                "resolution bounds. The hash excludes the ladder, which the row label already",
+                "states, and the corpus, which varies by seed on purpose -- so one value",
+                "across twelve cells is a check that the rows differ in their ladder and in",
+                "nothing else. `run_ablation` refuses to build a table where they do not.",
+                "",
+            ]
+        )
+    if not artifact.calibrated:
+        lines.extend(
+            [
+                "> Run **without** a fitted bundle, so the residual tiers carry the",
+                "> provisional probabilities they set themselves. That is the uncalibrated",
+                "> ablation row, not the deployed configuration.",
+                "",
+            ]
+        )
+    unavailable = [row for row in artifact.rows if 5 in row.tiers and not row.llm_available]
+    if unavailable:
+        lines.extend(
+            [
+                "> **No model was reachable when this table was produced.** The `T0-T5` row",
+                "> therefore ran the deterministic ladder T0-T4: its LLM columns are zero",
+                "> because no call was made, not because the tier was measured and found to",
+                "> contribute nothing. `EVALUATION.md` will not report a tier that did not",
+                "> run, and this note is how that distinction stays visible.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _sweep_table(
+    group: SweepGroup, metrics: Sequence[tuple[str, str, int]]
+) -> list[str]:
+    return [
+        f"| {label} | {_rendered(group.of(metric), digits=digits)} | "
+        f"{group.of(metric).minimum:.{digits}f} | {group.of(metric).maximum:.{digits}f} |"
+        for metric, label, digits in metrics
+    ]
+
+
+#: The rows every seed and difficulty table reports, as (field, label, digits).
+_SWEEP_ROWS: tuple[tuple[str, str, int], ...] = (
+    ("precision", "Auto-match precision", 4),
+    ("recall", "Link recall", 4),
+    ("f1", "F1", 4),
+    ("match_rate", "Match rate", 4),
+    ("exception_recall", "Exception recall", 4),
+    ("candidates_proposed", "Candidate yield", 1),
+    ("auto_matched", "Auto-matched links", 1),
+    ("false_positives", "False positives", 2),
+    ("unmatchable_count", "Unmatchable records", 1),
+)
+
+
+def _multi_seed_section(artifact: SweepArtifact | None) -> list[str]:
+    """PLAN.md §9.4: the headline configuration over five seeds, mean ± std."""
+    if artifact is None:
+        return []
+    group = artifact.headline
+    if group is None:
+        return []
+    lines = [
+        "## Multi-seed evaluation (PLAN.md §9.4)",
+        "",
+        "The headline configuration -- the full ladder with the fitted bundle, nothing",
+        f"switched off -- over **{len(group.seeds)} seeds** of `{group.split}` at",
+        f"**{group.difficulty}** difficulty: seeds "
+        + ", ".join(str(seed) for seed in group.seeds)
+        + ".",
+        "",
+        "*A single run's number is noise.* Every headline claim in this document is the",
+        "mean below; the single-seed tables elsewhere are the same configuration at the",
+        "first of these seeds, and they are labelled as single-seed where they appear.",
+        "",
+        "| Metric | Mean ± std | Min | Max |",
+        "|---|---|---|---|",
+        *_sweep_table(group, _SWEEP_ROWS),
+        f"| False-positive cost | "
+        f"{format_minor(round(group.of('false_positive_cost_minor').mean))} | "
+        f"{format_minor(round(group.of('false_positive_cost_minor').minimum))} | "
+        f"{format_minor(round(group.of('false_positive_cost_minor').maximum))} |",
+        "",
+        "Standard deviation is the **sample** deviation (`ddof = 1`): five seeds are a",
+        "sample of the generator's distribution, not the population of every corpus it",
+        "can produce. A single observation reports no spread rather than a spread of zero.",
+        "",
+    ]
+    hashes = group.config_hashes
+    if len(hashes) == 1:
+        lines.extend(
+            [
+                f"Every seed ran tuning configuration `{hashes[0]}` -- every threshold,",
+                "tolerance and gate, with the corpus identity excluded. One hash across all",
+                "the rows is what says the spread above is corpus variance and not",
+                "configuration drift.",
+                "",
+            ]
+        )
+    else:  # pragma: no cover - the runner holds the config fixed
+        lines.extend(
+            [
+                "**The seeds did not share a configuration** (`"
+                + "`, `".join(hashes)
+                + "`). The spread below therefore mixes corpus variance with a",
+                "configuration difference and should not be read as either.",
+                "",
+            ]
+        )
+    return lines
+
+
+def _difficulty_section(artifact: SweepArtifact | None) -> list[str]:
+    """How the headline configuration responds to the difficulty dial."""
+    if artifact is None or len(artifact.groups) < 2:
+        return []
+    lines = [
+        "## Difficulty response (PLAN.md §5.2, §9.4)",
+        "",
+        "The same headline configuration across the difficulty dial. The dial changes",
+        "*how much* goes wrong without changing *what* goes wrong -- the non-clean classes",
+        "keep their relative proportions and are rescaled -- so the three columns are",
+        "comparable to each other.",
+        "",
+        "| Metric | " + " | ".join(f"`{g.difficulty}`" for g in artifact.groups) + " |",
+        "|---" * (len(artifact.groups) + 1) + "|",
+    ]
+    for metric, label, digits in _SWEEP_ROWS:
+        cells = " | ".join(
+            _rendered(group.of(metric), digits=digits) for group in artifact.groups
+        )
+        lines.append(f"| {label} | {cells} |")
+    cost_cells = " | ".join(
+        format_minor(round(group.of("false_positive_cost_minor").mean))
+        for group in artifact.groups
+    )
+    lines.append(f"| False-positive cost | {cost_cells} |")
+    seed_cells = " | ".join(str(len(group.seeds)) for group in artifact.groups)
+    lines.append(f"| Seeds | {seed_cells} |")
+    lines.extend(
+        [
+            "",
+            "**One threshold, not one per difficulty.** `tau_high` was fitted once, on",
+            "`train` and `calibration` at standard difficulty, and is applied unchanged to",
+            "every column. Refitting per difficulty would measure the calibrator's ceiling",
+            "rather than the system's behaviour, and a deployed system has one threshold.",
+            "The honest consequence is that on `hard` the bundle is operating",
+            "off-distribution; because the threshold was selected for precision the effect",
+            "is conservative -- fewer auto-matches rather than wrong ones -- which is what",
+            "the match-rate row shows.",
+            "",
+            "No threshold, model or gate anywhere in this project was selected against a",
+            "`test` result at any difficulty.",
+            "",
+        ]
+    )
+    return lines
+
+
 def render_report(
-    runs: Sequence[EvaluatedRun], *, manifest: DatasetManifest, truth: GroundTruth
+    runs: Sequence[EvaluatedRun],
+    *,
+    manifest: DatasetManifest,
+    truth: GroundTruth,
+    llm_baseline: LLMBaselineArtifact | None = None,
+    ablation: AblationArtifact | None = None,
+    sweep: SweepArtifact | None = None,
 ) -> str:
-    """Render the whole document. Deterministic for a given input."""
+    """Render the whole document. Deterministic for a given input.
+
+    The three artefact arguments are optional and each renders as an absent
+    section when it is missing, never as an empty one. That keeps ``make eval``
+    honest in the degraded case: a report produced without the sweep says
+    nothing about seed variance rather than implying there is none.
+    """
     if not runs:
         raise ValueError("render_report needs at least one evaluated run")
 
     lines: list[str] = []
     lines.extend(_header(manifest, truth))
-    lines.extend(_comparison_table(runs))
+    lines.extend(_comparison_table(runs, llm_baseline))
+    lines.extend(_ablation_section(ablation))
+    lines.extend(_multi_seed_section(sweep))
+    lines.extend(_difficulty_section(sweep))
+    lines.extend(_llm_baseline_section(llm_baseline))
     for run in runs:
         lines.extend(_headline(run))
         lines.extend(_link_table(run))
@@ -746,6 +1348,7 @@ def render_report(
         lines.extend(_confusion_matrix(run))
         lines.extend(_auto_resolution(run))
         lines.extend(_llm_section(run))
+        lines.extend(_negative_analysis(run))
         lines.extend(_class_recall_table(run, truth))
         lines.extend(_money_table(run))
         lines.extend(_diagnostics(run))

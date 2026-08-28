@@ -432,7 +432,46 @@ class RunConfig(FrozenLedgerModel):
         ``run_id`` and output paths are excluded so that two runs of the same
         configuration hash identically -- that is what lets the evaluator prove
         a rerun reproduced a result rather than merely resembling it.
+
+        The **corpus** is part of this hash: a run over ``test`` seed 43 is not
+        the same run as one over seed 42, and an audit trail that said it was
+        would be wrong. :attr:`tuning_hash` is the one to compare across corpora.
         """
         payload = self.model_dump(mode="json", exclude={"run_id", "data_dir", "audit_dir"})
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def tuning_hash(self) -> str:
+        """Hash of the **tunables** alone: every knob, and nothing else.
+
+        Excluded on top of :attr:`config_hash`'s exclusions:
+
+        * ``split``, ``difficulty`` and ``seed`` -- which corpus this is, not how
+          it was processed. A multi-seed table exists precisely to run one
+          configuration over several corpora, so a hash that changed with the
+          seed could never witness that the configuration was held fixed.
+        * ``enabled_tiers`` -- which *ladder* ran. An ablation table exists
+          precisely to vary that, and it reports the ladder explicitly as the row
+          label; folding it into the hash would make the hash restate the label
+          and stop witnessing anything else.
+
+        What remains is the tolerances, the lexical gates, the graph parameters,
+        the thresholds, the severity bands, the resolution bounds and the LLM
+        configuration. One ``tuning_hash`` across the rows of a table is what
+        turns "nothing else changed" from a claim into a check.
+        """
+        payload = self.model_dump(
+            mode="json",
+            exclude={
+                "run_id",
+                "data_dir",
+                "audit_dir",
+                "split",
+                "difficulty",
+                "seed",
+                "enabled_tiers",
+            },
+        )
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]

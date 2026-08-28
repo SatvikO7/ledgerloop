@@ -67,8 +67,11 @@ from ledgerloop.state import ReconState
 __all__ = [
     "MATCHER_DESCRIPTION",
     "MATCHER_NAME",
+    "TIER_BY_INDEX",
     "MatchRun",
     "ResidualAdjudicator",
+    "ladder_description",
+    "ladder_name",
     "run_matching",
 ]
 
@@ -107,6 +110,53 @@ IMPLEMENTED_TIERS: tuple[Tier, ...] = (
     Tier.T3_FUZZY,
     Tier.T4_GRAPH,
 )
+
+#: ``RunConfig.enabled_tiers`` index -> the tier it switches off.
+#:
+#: The mapping is explicit rather than derived from ``Tier``'s ordinal so that
+#: renumbering the enum cannot silently repoint an ablation row at a different
+#: tier -- the row labels in ``EVALUATION.md`` would still say ``T0-T2`` while
+#: measuring something else.
+TIER_BY_INDEX: dict[int, Tier] = {
+    0: Tier.T0_EXACT,
+    1: Tier.T1_TOLERANCE,
+    2: Tier.T2_AGGREGATION,
+    3: Tier.T3_FUZZY,
+    4: Tier.T4_GRAPH,
+    5: Tier.T5_LLM,
+}
+
+
+def ladder_name(enabled_tiers: Sequence[int]) -> str:
+    """``T0``, ``T0-T2``, ``T0-T5`` -- what the run actually ran.
+
+    A contiguous range renders as its endpoints and anything else lists its
+    members, because an ablation row labelled ``T0-T4`` that skipped T2 would
+    be a mislabelled measurement rather than a terse one.
+    """
+    tiers = tuple(enabled_tiers)
+    if not tiers:  # pragma: no cover - RunConfig refuses an empty ladder
+        return "none"
+    contiguous = tuple(range(tiers[0], tiers[-1] + 1)) == tiers
+    if not contiguous:
+        return "+".join(f"T{index}" for index in tiers)
+    if len(tiers) == 1:
+        return f"T{tiers[0]}"
+    return f"T{tiers[0]}-T{tiers[-1]}"
+
+
+def ladder_description(enabled_tiers: Sequence[int]) -> str:
+    """The human-readable name of every tier that ran, in ladder order."""
+    labels = {
+        0: "exact key",
+        1: "tolerance",
+        2: "aggregation",
+        3: "lexical",
+        4: "graph",
+        5: "LLM adjudication",
+    }
+    named = ", ".join(labels[index] for index in enabled_tiers if index in labels)
+    return f"{named} (LedgerLoop {ladder_name(enabled_tiers)})"
 
 
 @dataclass(frozen=True)
@@ -233,6 +283,7 @@ def _tier_contributions(
     graph: GraphOutcome,
     decisions: tuple[MatchDecision, ...],
     elapsed_by_tier: dict[Tier, int],
+    enabled: frozenset[Tier],
     llm_candidates: tuple[MatchCandidate, ...] = (),
     llm_ran: bool = False,
 ) -> tuple[TierContribution, ...]:
@@ -248,10 +299,22 @@ def _tier_contributions(
     T2 depends on it twice over: it only ever sees settlements T0 and T1 left
     *undecided*, and the splits it exists for are exactly the ones they declined
     to consume.
+
+    ``enabled`` restricts the table to the tiers this run actually ran. An
+    ablation row that switched T3 and T4 off must not print a T3 row at zero:
+    a zero for a tier that did not run is a false measurement, which is the
+    same rule the absent-T5-row case already followed.
     """
-    tiers = (*IMPLEMENTED_TIERS, Tier.T5_LLM) if llm_ran else IMPLEMENTED_TIERS
-    proposed: dict[Tier, int] = dict.fromkeys(tiers, 0)
-    matched: dict[Tier, int] = dict.fromkeys(tiers, 0)
+    ran = (*IMPLEMENTED_TIERS, Tier.T5_LLM) if llm_ran else IMPLEMENTED_TIERS
+    tiers = tuple(tier for tier in ran if tier in enabled)
+
+    # Tallied over every tier, then projected onto the ones that ran. A disabled
+    # tier contributes nothing by construction, so the two orders agree -- but
+    # accumulating into a dict keyed only on the enabled tiers would raise on
+    # the first candidate from a tier the caller switched off, which is a
+    # crash rather than a measurement.
+    proposed: dict[Tier, int] = dict.fromkeys(ran, 0)
+    matched: dict[Tier, int] = dict.fromkeys(ran, 0)
 
     proposed[Tier.T0_EXACT] += len(order_leg.candidates)
     for outcome in outcomes:
@@ -374,18 +437,42 @@ def run_matching(
     :func:`~ledgerloop.matching.calibration.configure_for` fills from the same
     bundle -- so a fitted threshold is inside ``config_hash`` rather than
     beside it.
+
+    ``config.enabled_tiers`` is what the **ablation** turns: a tier not listed
+    does not run, contributes no candidates, and gets **no row in the tier
+    table** rather than a row of zeros. The field has carried that description
+    since Step 0 and Step 10 is where the ladder starts reading it.
+
+    Switching a tier off is not the same as it finding nothing. Every tier here
+    consumes from the shared pool, so removing T1 leaves its settlements
+    *undecided* and T2 sees them -- which is precisely the marginal contribution
+    an ablation row is asking about. That is why the rows are produced by
+    re-running the ladder rather than by subtracting tier counters from a single
+    full run.
     """
     started_ns = time.perf_counter_ns()
     stamp = decided_at or datetime.now()
+    enabled = frozenset(config.enabled_tiers)
+    enabled_tiers = frozenset(
+        TIER_BY_INDEX[index] for index in config.enabled_tiers if index in TIER_BY_INDEX
+    )
 
     context = MatchContext.from_ingest(ingest)
 
     t0_started = time.perf_counter_ns()
-    order_leg, t0_bank = run_tier0(context)
+    if 0 in enabled:
+        order_leg, t0_bank = run_tier0(context)
+    else:
+        order_leg = OrderLegOutcome(candidates=())
+        t0_bank = BankLegOutcome(tier=Tier.T0_EXACT, candidates=())
     t0_ms = (time.perf_counter_ns() - t0_started) // 1_000_000
 
     t1_started = time.perf_counter_ns()
-    t1_bank = run_tier1(context, config.tolerances)
+    t1_bank = (
+        run_tier1(context, config.tolerances)
+        if 1 in enabled
+        else BankLegOutcome(tier=Tier.T1_TOLERANCE, candidates=())
+    )
     t1_ms = (time.perf_counter_ns() - t1_started) // 1_000_000
 
     # The residual loop (PLAN.md 6.1). T0 and T1 are exact and run once --
@@ -403,17 +490,27 @@ def run_matching(
     t2_ms = t3_ms = t4_ms = 0
     passes = 0
 
-    for _ in range(config.graph.max_rerun_passes):
+    # The loop exists to let T2/T3/T4 unlock each other. With none of them
+    # enabled there is nothing to iterate, and running an empty pass would
+    # report `passes = 1` for a ladder that has no residual stage at all.
+    residual_passes = (
+        config.graph.max_rerun_passes if enabled & {2, 3, 4} else 0
+    )
+    for _ in range(residual_passes):
         passes += 1
         before = len(residual)
 
         started = time.perf_counter_ns()
-        pass_aggregation = run_tier2(context, config.tolerances)
+        pass_aggregation = (
+            run_tier2(context, config.tolerances) if 2 in enabled else AggregationOutcome()
+        )
         t2_ms += (time.perf_counter_ns() - started) // 1_000_000
 
         started = time.perf_counter_ns()
-        pass_lexical = run_tier3(
-            context, config.tolerances, config.lexical, profiles=profiles
+        pass_lexical = (
+            run_tier3(context, config.tolerances, config.lexical, profiles=profiles)
+            if 3 in enabled
+            else LexicalOutcome()
         )
         t3_ms += (time.perf_counter_ns() - started) // 1_000_000
 
@@ -433,7 +530,11 @@ def run_matching(
             *pass_lexical.candidates,
         )
         started = time.perf_counter_ns()
-        pass_graph = run_tier4(context, established, config.graph, config.thresholds)
+        pass_graph = (
+            run_tier4(context, established, config.graph, config.thresholds)
+            if 4 in enabled
+            else GraphOutcome()
+        )
         t4_ms += (time.perf_counter_ns() - started) // 1_000_000
 
         if bundle is not None:
@@ -456,7 +557,7 @@ def run_matching(
     adjudication: object | None = None
     t5_ms = 0
     llm_candidates: tuple[MatchCandidate, ...] = ()
-    if adjudicator is not None:
+    if adjudicator is not None and 5 in enabled:
         started = time.perf_counter_ns()
         established = (
             *order_leg.candidates,
@@ -496,9 +597,17 @@ def run_matching(
     by_id = {candidate.candidate_id: candidate for candidate in candidates}
     elapsed_ms = (time.perf_counter_ns() - started_ns) // 1_000_000
 
+    # The name describes what *ran*, not what was permitted. A config listing
+    # T5 on a machine with no key ran T0-T4, and labelling that row `T0-T5`
+    # would credit the ladder with a tier it never invoked.
+    ran_tiers = tuple(
+        index
+        for index in config.enabled_tiers
+        if index != 5 or (adjudicator is not None)
+    )
     return MatchRun(
-        name=MATCHER_NAME,
-        description=MATCHER_DESCRIPTION,
+        name=ladder_name(ran_tiers),
+        description=ladder_description(ran_tiers),
         state=state,
         predictions=_predictions(decisions, by_id),
         tier_contributions=_tier_contributions(
@@ -516,8 +625,9 @@ def run_matching(
                 Tier.T4_GRAPH: t4_ms,
                 Tier.T5_LLM: t5_ms,
             },
+            enabled=enabled_tiers,
             llm_candidates=llm_candidates,
-            llm_ran=adjudicator is not None,
+            llm_ran=adjudicator is not None and 5 in enabled,
         ),
         wall_clock_ms=int(elapsed_ms),
         order_leg=order_leg,

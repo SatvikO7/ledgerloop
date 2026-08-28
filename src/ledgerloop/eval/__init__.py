@@ -20,11 +20,35 @@ The package has four parts:
   never touches the test split.
 * :mod:`ledgerloop.eval.report` -- renders ``EVALUATION.md``. Nothing in that
   document is hand-typed.
+
+Step 10 added the comparison the plan's §9 is built around, in five modules:
+
+* :mod:`ledgerloop.eval.harness` -- one scored run of the production pipeline
+  over one dataset. The headline, every ablation row and every sweep row go
+  through it, so none of them can drift into a second implementation.
+* :mod:`ledgerloop.eval.summary` -- the scalars a table averages, and mean ± std.
+* :mod:`ledgerloop.eval.artifacts` -- the serialised results, models only.
+* :mod:`ledgerloop.eval.ablation` and :mod:`ledgerloop.eval.sweep` -- the
+  runners that produce them.
+* :mod:`ledgerloop.eval.llm_baseline` -- B2, plus
+  :mod:`ledgerloop.eval.offline_provider`, the stand-in that lets it run where
+  no provider key exists.
+
+**The models are split from the runners on purpose.** ``report`` renders the
+tables and the runners import ``llm``; ``matching`` imports ``eval.metrics`` for
+one contract type. Without the split those three facts close into an import
+cycle and hand ``matching`` a transitive dependency on ``llm`` -- the one
+dependency ARCHITECTURE.md §6, decision 43 forbids.
 """
 
 from __future__ import annotations
 
-from ledgerloop.eval.baselines import BaselineRun, run_b0
+from ledgerloop.eval.artifacts import (
+    AblationArtifact,
+    LLMBaselineArtifact,
+    SweepArtifact,
+)
+from ledgerloop.eval.baselines import BaselineRun, run_b0, run_b1
 from ledgerloop.eval.metrics import (
     EVALUATED_RECORD_TYPES,
     LinkConfusion,
@@ -45,18 +69,25 @@ from ledgerloop.eval.reliability import (
     measure_calibration,
 )
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
+from ledgerloop.eval.summary import Aggregate, RunSummary, aggregate, summarise
 from ledgerloop.eval.truth_io import DatasetManifest, load_ground_truth, load_manifest
 
 __all__ = [
     "EVALUATED_RECORD_TYPES",
+    "AblationArtifact",
+    "Aggregate",
     "BaselineRun",
     "CalibrationEvaluation",
     "DatasetManifest",
     "EvaluatedRun",
+    "LLMBaselineArtifact",
     "LinkConfusion",
     "MatchRateResult",
     "MoneyView",
     "PredictedLink",
+    "RunSummary",
+    "SweepArtifact",
+    "aggregate",
     "confusion",
     "evaluate",
     "label_candidates",
@@ -69,6 +100,8 @@ __all__ = [
     "recall_by_anomaly_class",
     "render_report",
     "run_b0",
+    "run_b1",
+    "summarise",
     "wilson_interval",
     "write_report",
 ]

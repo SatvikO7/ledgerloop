@@ -208,15 +208,25 @@ class TestNoAnswerCanDecideAMatch:
         high=st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
     )
     def test_an_unmeasured_probability_can_never_reach_tau_high(self, low, high):
-        """Unless the band is degenerate, in which case it routes to an exception."""
+        """The invariant that keeps a T5 proposal from auto-matching itself.
+
+        Two collapses are allowed and both go the safe way. A degenerate band
+        (`tau_low == tau_high`) returns `tau_low`, routing to an exception; so
+        does a band too narrow to hold a float, which Hypothesis found at
+        `[0.0, 5e-324]`. What is never allowed is a value at or above
+        `tau_high`, and that is asserted unconditionally.
+        """
         if low > high:
             low, high = high, low
         thresholds = DecisionThresholds(tau_low=low, tau_high=high)
         value = unmeasured_probability(thresholds)
-        if low < high:
-            assert low < value < high
+        assert value <= thresholds.tau_high
+        if low < value:
+            # A real band. The value sits strictly inside it, so the policy
+            # routes it to review rather than to a ledger.
+            assert value < high
         else:
-            assert value <= thresholds.tau_high
+            assert value == thresholds.tau_low
 
 
 class TestNoAnswerCanChangeAmountOrClass:

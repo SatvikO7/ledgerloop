@@ -243,10 +243,22 @@ def unmeasured_probability(thresholds: DecisionThresholds) -> float:
     A degenerate band (``tau_low == tau_high``, which a fitted threshold can
     produce) collapses to ``tau_low`` -- routing to an exception rather than
     inventing head-room that the configuration does not have.
+
+    So does a band too narrow for a float to sit inside. With
+    ``tau_low = 0.0`` and ``tau_high = 5e-324`` there is no representable value
+    strictly between them, and the midpoint rounds down onto ``tau_low``. That
+    is not a case any fitted threshold produces, and it is handled rather than
+    excluded because the alternative is a function whose stated guarantee --
+    *strictly below any tau_high* -- is true only for the inputs someone thought
+    to test. A property test found it; the fix is one comparison, and it
+    collapses in the same safe direction the degenerate case does.
     """
     if thresholds.tau_low >= thresholds.tau_high:
         return thresholds.tau_low
-    return (thresholds.tau_low + thresholds.tau_high) / 2.0
+    midpoint = (thresholds.tau_low + thresholds.tau_high) / 2.0
+    if not thresholds.tau_low < midpoint < thresholds.tau_high:
+        return thresholds.tau_low
+    return midpoint
 
 
 def _adjudication_candidate(

@@ -106,13 +106,17 @@ class TestPendingIsNotZero:
         assert "run without `--calibration`" in text
         assert "### Calibration" not in text
 
-    def test_unbuilt_baselines_are_listed_as_pending(self, rendered):
-        """B3 left the pending list at Step 8: the full ladder now runs and is
-        scored as a real row rather than being promised."""
+    def test_b2_renders_as_pending_rather_than_as_zeros(self, rendered):
+        """Step 10 built B1 and B2, so nothing in the table is promised any more.
+
+        What survives is the rule the pending list existed for: a row whose
+        artefact is absent renders as `_pending_`, never as a precision of zero.
+        B2's artefact is the only one that can legitimately be missing from a
+        report -- it is the one measurement that costs quota.
+        """
         text, _ = rendered
-        for name in ("B1", "B2"):
-            assert f"| {name} |" in text
-        assert "_pending_ (Step 10)" in text
+        assert "| B2 | `dev` | _pending_ |" in text
+        assert "| B2 | `dev` | 0.00% |" not in text
 
     def test_a_zero_denominator_renders_as_na_not_as_zero(self):
         """The single most common way an evaluation report misleads."""
