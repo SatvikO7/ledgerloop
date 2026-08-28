@@ -23,7 +23,13 @@ data/generated/
 reports/
 EVALUATION.md
 
+# Streamlit's local state. Never a project artefact.
+.streamlit/
+
 # Private development notes and per-step documentation. Never published.
+# Includes every `.local/steps/step-NN-*.md` report -- they are working notes
+# for the next session, not user documentation. What users need is in
+# README.md, and what the numbers are is in EVALUATION.md.
 .local/
 
 # Internal planning and design documents. Kept on disk and actively used --

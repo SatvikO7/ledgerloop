@@ -68,11 +68,17 @@ __all__ = [
     "MATCHER_DESCRIPTION",
     "MATCHER_NAME",
     "TIER_BY_INDEX",
+    "LadderRun",
     "MatchRun",
     "ResidualAdjudicator",
+    "adjudicate_residual",
+    "close_ladder",
     "ladder_description",
     "ladder_name",
+    "open_ladder",
     "run_matching",
+    "run_residual_pass",
+    "should_run_residual_pass",
 ]
 
 
@@ -406,6 +412,323 @@ def _merge_lexical(left: LexicalOutcome, right: LexicalOutcome) -> LexicalOutcom
     )
 
 
+@dataclass
+class LadderRun:
+    """The tier ladder's accumulating state. One per run.
+
+    PLAN.md §4.2's rule -- *every node takes state and returns state, no hidden
+    globals* -- applied inside the ladder rather than only around it. It exists
+    because Step 11 needs the residual loop to be a **real** cycle in a graph,
+    and a loop that lives inside one opaque function cannot be one.
+
+    Nothing here is new behaviour. Each stage below is a verbatim extraction of
+    a block that was already inside :func:`run_matching`, in the same order,
+    and ``run_matching`` is now their sequential composition -- so there is one
+    implementation of the ladder and the graph drives the same code the CLI
+    does. A test asserts the two produce identical predictions, decisions and
+    tier tables.
+    """
+
+    ingest: IngestResult
+    config: RunConfig
+    bundle: CalibrationBundle | None
+    decided_at: datetime
+    started_ns: int
+
+    context: MatchContext
+    profiles: dict[str, object]
+
+    order_leg: OrderLegOutcome
+    t0_bank: BankLegOutcome
+    t1_bank: BankLegOutcome
+
+    aggregation: AggregationOutcome = field(default_factory=AggregationOutcome)
+    lexical: LexicalOutcome = field(default_factory=LexicalOutcome)
+    graph: GraphOutcome = field(default_factory=GraphOutcome)
+    residual: list[MatchCandidate] = field(default_factory=list)
+
+    llm_candidates: tuple[MatchCandidate, ...] = ()
+    adjudication: object | None = None
+    adjudicator_ran: bool = False
+
+    passes: int = 0
+    last_pass_added: int = 0
+    elapsed_by_tier: dict[Tier, int] = field(default_factory=dict)
+
+    @property
+    def enabled(self) -> frozenset[int]:
+        return frozenset(self.config.enabled_tiers)
+
+    @property
+    def residual_cap(self) -> int:
+        """How many residual passes this ladder may run.
+
+        Zero when none of T2/T3/T4 is enabled: the loop exists to let them
+        unlock each other, and running an empty pass would report ``passes = 1``
+        for a ladder that has no residual stage at all.
+        """
+        return self.config.graph.max_rerun_passes if self.enabled & {2, 3, 4} else 0
+
+    @property
+    def established(self) -> tuple[MatchCandidate, ...]:
+        """Everything decided so far, in ladder order. T4's and T5's premise set."""
+        return (
+            *self.order_leg.candidates,
+            *self.t0_bank.candidates,
+            *self.t1_bank.candidates,
+            *self.residual,
+        )
+
+    def _add(self, tier: Tier, elapsed_ns: int) -> None:
+        millis = elapsed_ns // 1_000_000
+        self.elapsed_by_tier[tier] = self.elapsed_by_tier.get(tier, 0) + millis
+
+
+def open_ladder(
+    ingest: IngestResult,
+    config: RunConfig,
+    *,
+    bundle: CalibrationBundle | None = None,
+    decided_at: datetime | None = None,
+) -> LadderRun:
+    """Stage 1: build the indexes, run the exact tiers, learn the merchant master.
+
+    T0 and T1 run **once**. They are exact, and nothing a later tier does can
+    unlock a key that was not there -- which is why only T2/T3/T4 are inside the
+    loop. The merchant master is likewise built once: it is derived from the
+    *references* in the statement, which no amount of matching alters.
+    """
+    started_ns = time.perf_counter_ns()
+    enabled = frozenset(config.enabled_tiers)
+    context = MatchContext.from_ingest(ingest)
+
+    t0_started = time.perf_counter_ns()
+    if 0 in enabled:
+        order_leg, t0_bank = run_tier0(context)
+    else:
+        order_leg = OrderLegOutcome(candidates=())
+        t0_bank = BankLegOutcome(tier=Tier.T0_EXACT, candidates=())
+    t0_ns = time.perf_counter_ns() - t0_started
+
+    t1_started = time.perf_counter_ns()
+    t1_bank = (
+        run_tier1(context, config.tolerances)
+        if 1 in enabled
+        else BankLegOutcome(tier=Tier.T1_TOLERANCE, candidates=())
+    )
+    t1_ns = time.perf_counter_ns() - t1_started
+
+    run = LadderRun(
+        ingest=ingest,
+        config=config,
+        bundle=bundle,
+        decided_at=decided_at or datetime.now(),
+        started_ns=started_ns,
+        context=context,
+        profiles=dict(build_profiles(context)),
+        order_leg=order_leg,
+        t0_bank=t0_bank,
+        t1_bank=t1_bank,
+    )
+    run._add(Tier.T0_EXACT, t0_ns)
+    run._add(Tier.T1_TOLERANCE, t1_ns)
+    return run
+
+
+def should_run_residual_pass(run: LadderRun) -> bool:
+    """Stage 2's guard, and the graph's conditional edge.
+
+    The loop stops when the cap is reached or when a pass changed nothing. The
+    first pass always runs (there is nothing yet to have changed), which is why
+    the second clause is conditioned on ``passes``.
+    """
+    if run.passes >= run.residual_cap:
+        return False
+    return run.passes == 0 or run.last_pass_added > 0
+
+
+def run_residual_pass(run: LadderRun) -> LadderRun:
+    """Stage 2: one pass of T2 → T3 → T4 over what the ladder has left.
+
+    Called repeatedly while :func:`should_run_residual_pass` holds. T2, T3 and
+    T4 each consume records the others may have been waiting on, so a pass that
+    adds a candidate can unlock the next one.
+
+    The bundle scores each pass **as it is produced**, before T4 reads the pass
+    as its premise set: T4 admits only premises at or above ``tau_high``, so
+    calibrating afterwards would let it infer from links the policy was about
+    to refuse. The authoritative blend happens once in :func:`close_ladder`.
+    """
+    enabled = run.enabled
+    run.passes += 1
+    before = len(run.residual)
+
+    started = time.perf_counter_ns()
+    pass_aggregation = (
+        run_tier2(run.context, run.config.tolerances)
+        if 2 in enabled
+        else AggregationOutcome()
+    )
+    run._add(Tier.T2_AGGREGATION, time.perf_counter_ns() - started)
+
+    started = time.perf_counter_ns()
+    pass_lexical = (
+        run_tier3(
+            run.context,
+            run.config.tolerances,
+            run.config.lexical,
+            profiles=run.profiles,  # type: ignore[arg-type]
+        )
+        if 3 in enabled
+        else LexicalOutcome()
+    )
+    run._add(Tier.T3_FUZZY, time.perf_counter_ns() - started)
+
+    if run.bundle is not None:
+        apply_bundle((*pass_aggregation.candidates, *pass_lexical.candidates), run.bundle)
+
+    established = (
+        *run.established,
+        *pass_aggregation.candidates,
+        *pass_lexical.candidates,
+    )
+    started = time.perf_counter_ns()
+    pass_graph = (
+        run_tier4(run.context, established, run.config.graph, run.config.thresholds)
+        if 4 in enabled
+        else GraphOutcome()
+    )
+    run._add(Tier.T4_GRAPH, time.perf_counter_ns() - started)
+
+    if run.bundle is not None:
+        apply_bundle(pass_graph.candidates, run.bundle)
+
+    run.residual.extend(pass_aggregation.candidates)
+    run.residual.extend(pass_lexical.candidates)
+    run.residual.extend(pass_graph.candidates)
+    run.aggregation = _merge_aggregation(run.aggregation, pass_aggregation)
+    run.lexical = _merge_lexical(run.lexical, pass_lexical)
+    # The last pass wins rather than merging: T4's counters describe what is
+    # still open, not what happened, and summing them would double-count a
+    # settlement that stayed open across passes.
+    run.graph = pass_graph
+    run.last_pass_added = len(run.residual) - before
+    return run
+
+
+def adjudicate_residual(
+    run: LadderRun, adjudicator: ResidualAdjudicator | None
+) -> LadderRun:
+    """Stage 3: T5, over what everything before it left.
+
+    It sees the established candidates so its evidence packs describe the real
+    residual, and its output rejoins the ordinary flow: scored by the blender if
+    one is fitted, then routed by the same policy as every other tier. Nothing
+    here decides anything.
+    """
+    run.adjudicator_ran = adjudicator is not None and 5 in run.enabled
+    if not run.adjudicator_ran:
+        return run
+    assert adjudicator is not None  # adjudicator_ran implies one
+
+    started = time.perf_counter_ns()
+    proposed, outcome = adjudicator(run.context, run.established)
+    run.llm_candidates = tuple(proposed)
+    run.adjudication = outcome
+    if run.bundle is not None:
+        apply_bundle(run.llm_candidates, run.bundle)
+    run._add(Tier.T5_LLM, time.perf_counter_ns() - started)
+    return run
+
+
+def close_ladder(run: LadderRun) -> MatchRun:
+    """Stage 4: blend everything once, apply the policy, and assemble the run.
+
+    The blend covers T0 and T1 as well, so the reported counters describe the
+    whole run rather than the residual passes. Re-scoring an already-scored
+    candidate is idempotent: the same features go through the same fitted model.
+    """
+    config = run.config
+    bank_legs = (run.t0_bank, run.t1_bank)
+    candidates: list[MatchCandidate] = [
+        *run.order_leg.candidates,
+        *run.t0_bank.candidates,
+        *run.t1_bank.candidates,
+        *run.residual,
+        *run.llm_candidates,
+    ]
+    blend = (
+        apply_bundle(candidates, run.bundle) if run.bundle is not None else BlendOutcome()
+    )
+    decisions = decide_all(candidates, config.thresholds, decided_at=run.decided_at)
+
+    state = ReconState(run_id=config.run_id, config=config)
+    state.raw = run.ingest.raw_by_source
+    state.normalized = run.ingest.normalized
+    state.candidates = candidates
+    state.decisions = list(decisions)
+
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
+    elapsed_ms = (time.perf_counter_ns() - run.started_ns) // 1_000_000
+
+    # The name describes what *ran*, not what was permitted. A config listing
+    # T5 on a machine with no key ran T0-T4, and labelling that row `T0-T5`
+    # would credit the ladder with a tier it never invoked.
+    ran_tiers = tuple(
+        index for index in config.enabled_tiers if index != 5 or run.adjudicator_ran
+    )
+    enabled_tiers = frozenset(
+        TIER_BY_INDEX[index] for index in config.enabled_tiers if index in TIER_BY_INDEX
+    )
+    context = run.context
+    return MatchRun(
+        name=ladder_name(ran_tiers),
+        description=ladder_description(ran_tiers),
+        state=state,
+        predictions=_predictions(decisions, by_id),
+        tier_contributions=_tier_contributions(
+            bank_legs,
+            run.order_leg,
+            run.aggregation,
+            run.lexical,
+            run.graph,
+            decisions,
+            dict(run.elapsed_by_tier),
+            enabled=enabled_tiers,
+            llm_candidates=run.llm_candidates,
+            llm_ran=run.adjudicator_ran,
+        ),
+        wall_clock_ms=int(elapsed_ms),
+        order_leg=run.order_leg,
+        bank_legs=bank_legs,
+        aggregation=run.aggregation,
+        lexical=run.lexical,
+        graph=run.graph,
+        passes=run.passes,
+        blend=blend,
+        calibrated=run.bundle is not None,
+        adjudication=run.adjudication,
+        context=context,
+        merchant_spellings=frozenset(
+            spelling
+            for profile in run.profiles.values()
+            for spelling in profile.spellings  # type: ignore[attr-defined]
+        ),
+        credits_seen=len(context.credits),
+        credits_with_utr=context.credits_with_utr,
+        settlements_seen=len(context.settlements),
+        settlements_with_utr=context.settlements_with_utr,
+        settlements_resolved=sum(leg.resolved_settlements for leg in bank_legs)
+        + run.aggregation.settlements_resolved
+        + run.lexical.settlements_resolved,
+        settlements_contested=sum(leg.contested_settlements for leg in bank_legs)
+        + run.aggregation.settlements_ambiguous
+        + run.lexical.settlements_ambiguous,
+        settlements_unresolved=len(context.settlements)
+        - len(context.consumed_settlements),
+    )
+
+
 def run_matching(
     ingest: IngestResult,
     config: RunConfig,
@@ -415,6 +738,11 @@ def run_matching(
     adjudicator: ResidualAdjudicator | None = None,
 ) -> MatchRun:
     """Run the tier ladder over an ingested dataset.
+
+    The sequential composition of the four stages above, and **the only
+    implementation of that sequence**: :mod:`ledgerloop.agent.graph` wires the
+    same four functions into a LangGraph with the residual loop as a real cycle,
+    so the graph cannot drift from the CLI.
 
     ``decided_at`` stamps every decision in the run. One timestamp for the whole
     run rather than one per decision: the ordering that matters for replay is
@@ -429,230 +757,19 @@ def run_matching(
     ``bundle`` is the fitted blender, isotonic calibrator and threshold from
     Step 7. Without it the residual tiers keep the provisional probabilities
     they set themselves -- which is what every step up to Step 6 measured, and
-    what the ``--no-calibration`` ablation row still measures. With it, each
-    residual pass is scored **as it is produced**, before T4 reads the pass as
-    its premise set: T4 admits only premises at or above ``tau_high``, so
-    calibrating afterwards would let it infer from links the policy was about to
-    refuse. The threshold itself comes from ``config.thresholds``, which
-    :func:`~ledgerloop.matching.calibration.configure_for` fills from the same
-    bundle -- so a fitted threshold is inside ``config_hash`` rather than
-    beside it.
+    what the ``--no-calibration`` ablation row still measures.
 
     ``config.enabled_tiers`` is what the **ablation** turns: a tier not listed
     does not run, contributes no candidates, and gets **no row in the tier
-    table** rather than a row of zeros. The field has carried that description
-    since Step 0 and Step 10 is where the ladder starts reading it.
+    table** rather than a row of zeros.
 
     Switching a tier off is not the same as it finding nothing. Every tier here
     consumes from the shared pool, so removing T1 leaves its settlements
     *undecided* and T2 sees them -- which is precisely the marginal contribution
-    an ablation row is asking about. That is why the rows are produced by
-    re-running the ladder rather than by subtracting tier counters from a single
-    full run.
+    an ablation row is asking about.
     """
-    started_ns = time.perf_counter_ns()
-    stamp = decided_at or datetime.now()
-    enabled = frozenset(config.enabled_tiers)
-    enabled_tiers = frozenset(
-        TIER_BY_INDEX[index] for index in config.enabled_tiers if index in TIER_BY_INDEX
-    )
-
-    context = MatchContext.from_ingest(ingest)
-
-    t0_started = time.perf_counter_ns()
-    if 0 in enabled:
-        order_leg, t0_bank = run_tier0(context)
-    else:
-        order_leg = OrderLegOutcome(candidates=())
-        t0_bank = BankLegOutcome(tier=Tier.T0_EXACT, candidates=())
-    t0_ms = (time.perf_counter_ns() - t0_started) // 1_000_000
-
-    t1_started = time.perf_counter_ns()
-    t1_bank = (
-        run_tier1(context, config.tolerances)
-        if 1 in enabled
-        else BankLegOutcome(tier=Tier.T1_TOLERANCE, candidates=())
-    )
-    t1_ms = (time.perf_counter_ns() - t1_started) // 1_000_000
-
-    # The residual loop (PLAN.md 6.1). T0 and T1 are exact and run once --
-    # nothing a later tier does can unlock a key that was not there. T2, T3 and
-    # T4 each consume records the others may have been waiting on, so they
-    # repeat until a pass changes nothing or the configured cap is reached.
-    #
-    # The merchant master is built once: it is derived from the *references* in
-    # the statement, which no amount of matching alters.
-    profiles = build_profiles(context)
-    aggregation = AggregationOutcome()
-    lexical = LexicalOutcome()
-    graph = GraphOutcome()
-    residual: list[MatchCandidate] = []
-    t2_ms = t3_ms = t4_ms = 0
-    passes = 0
-
-    # The loop exists to let T2/T3/T4 unlock each other. With none of them
-    # enabled there is nothing to iterate, and running an empty pass would
-    # report `passes = 1` for a ladder that has no residual stage at all.
-    residual_passes = (
-        config.graph.max_rerun_passes if enabled & {2, 3, 4} else 0
-    )
-    for _ in range(residual_passes):
-        passes += 1
-        before = len(residual)
-
-        started = time.perf_counter_ns()
-        pass_aggregation = (
-            run_tier2(context, config.tolerances) if 2 in enabled else AggregationOutcome()
-        )
-        t2_ms += (time.perf_counter_ns() - started) // 1_000_000
-
-        started = time.perf_counter_ns()
-        pass_lexical = (
-            run_tier3(context, config.tolerances, config.lexical, profiles=profiles)
-            if 3 in enabled
-            else LexicalOutcome()
-        )
-        t3_ms += (time.perf_counter_ns() - started) // 1_000_000
-
-        if bundle is not None:
-            # Scored here, before T4 reads this pass as its premise set: T4
-            # admits only premises at or above tau_high, so calibrating
-            # afterwards would let it infer from links the policy was about to
-            # refuse. The authoritative count is taken once at the end.
-            apply_bundle((*pass_aggregation.candidates, *pass_lexical.candidates), bundle)
-
-        established = (
-            *order_leg.candidates,
-            *t0_bank.candidates,
-            *t1_bank.candidates,
-            *residual,
-            *pass_aggregation.candidates,
-            *pass_lexical.candidates,
-        )
-        started = time.perf_counter_ns()
-        pass_graph = (
-            run_tier4(context, established, config.graph, config.thresholds)
-            if 4 in enabled
-            else GraphOutcome()
-        )
-        t4_ms += (time.perf_counter_ns() - started) // 1_000_000
-
-        if bundle is not None:
-            apply_bundle(pass_graph.candidates, bundle)
-
-        residual.extend(pass_aggregation.candidates)
-        residual.extend(pass_lexical.candidates)
-        residual.extend(pass_graph.candidates)
-        aggregation = _merge_aggregation(aggregation, pass_aggregation)
-        lexical = _merge_lexical(lexical, pass_lexical)
-        graph = pass_graph
-
-        if len(residual) == before:
-            break
-
-    # T5 last, and only over what everything before it left. It sees the
-    # established candidates so its evidence packs describe the real residual,
-    # and its output rejoins the ordinary flow: scored by the blender if one is
-    # fitted, then routed by the same policy as every other tier.
-    adjudication: object | None = None
-    t5_ms = 0
-    llm_candidates: tuple[MatchCandidate, ...] = ()
-    if adjudicator is not None and 5 in enabled:
-        started = time.perf_counter_ns()
-        established = (
-            *order_leg.candidates,
-            *t0_bank.candidates,
-            *t1_bank.candidates,
-            *residual,
-        )
-        proposed, adjudication = adjudicator(context, established)
-        llm_candidates = tuple(proposed)
-        if bundle is not None:
-            apply_bundle(llm_candidates, bundle)
-        t5_ms = (time.perf_counter_ns() - started) // 1_000_000
-
-    bank_legs = (t0_bank, t1_bank)
-    candidates: list[MatchCandidate] = [
-        *order_leg.candidates,
-        *t0_bank.candidates,
-        *t1_bank.candidates,
-        *residual,
-        *llm_candidates,
-    ]
-    # One authoritative pass over every candidate, T0 and T1 included, so the
-    # reported counters describe the whole run rather than the residual passes.
-    # Re-scoring an already-scored candidate is idempotent: the same features go
-    # through the same fitted model.
-    blend = (
-        apply_bundle(candidates, bundle) if bundle is not None else BlendOutcome()
-    )
-    decisions = decide_all(candidates, config.thresholds, decided_at=stamp)
-
-    state = ReconState(run_id=config.run_id, config=config)
-    state.raw = ingest.raw_by_source
-    state.normalized = ingest.normalized
-    state.candidates = candidates
-    state.decisions = list(decisions)
-
-    by_id = {candidate.candidate_id: candidate for candidate in candidates}
-    elapsed_ms = (time.perf_counter_ns() - started_ns) // 1_000_000
-
-    # The name describes what *ran*, not what was permitted. A config listing
-    # T5 on a machine with no key ran T0-T4, and labelling that row `T0-T5`
-    # would credit the ladder with a tier it never invoked.
-    ran_tiers = tuple(
-        index
-        for index in config.enabled_tiers
-        if index != 5 or (adjudicator is not None)
-    )
-    return MatchRun(
-        name=ladder_name(ran_tiers),
-        description=ladder_description(ran_tiers),
-        state=state,
-        predictions=_predictions(decisions, by_id),
-        tier_contributions=_tier_contributions(
-            bank_legs,
-            order_leg,
-            aggregation,
-            lexical,
-            graph,
-            decisions,
-            {
-                Tier.T0_EXACT: t0_ms,
-                Tier.T1_TOLERANCE: t1_ms,
-                Tier.T2_AGGREGATION: t2_ms,
-                Tier.T3_FUZZY: t3_ms,
-                Tier.T4_GRAPH: t4_ms,
-                Tier.T5_LLM: t5_ms,
-            },
-            enabled=enabled_tiers,
-            llm_candidates=llm_candidates,
-            llm_ran=adjudicator is not None and 5 in enabled,
-        ),
-        wall_clock_ms=int(elapsed_ms),
-        order_leg=order_leg,
-        bank_legs=bank_legs,
-        aggregation=aggregation,
-        lexical=lexical,
-        graph=graph,
-        passes=passes,
-        blend=blend,
-        calibrated=bundle is not None,
-        adjudication=adjudication,
-        context=context,
-        merchant_spellings=frozenset(
-            spelling for profile in profiles.values() for spelling in profile.spellings
-        ),
-        credits_seen=len(context.credits),
-        credits_with_utr=context.credits_with_utr,
-        settlements_seen=len(context.settlements),
-        settlements_with_utr=context.settlements_with_utr,
-        settlements_resolved=sum(leg.resolved_settlements for leg in bank_legs)
-        + aggregation.settlements_resolved
-        + lexical.settlements_resolved,
-        settlements_contested=sum(leg.contested_settlements for leg in bank_legs)
-        + aggregation.settlements_ambiguous
-        + lexical.settlements_ambiguous,
-        settlements_unresolved=len(context.settlements)
-        - len(context.consumed_settlements),
-    )
+    run = open_ladder(ingest, config, bundle=bundle, decided_at=decided_at)
+    while should_run_residual_pass(run):
+        run_residual_pass(run)
+    adjudicate_residual(run, adjudicator)
+    return close_ladder(run)

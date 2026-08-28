@@ -21,13 +21,28 @@ dependencies = [
 # as many lines as the import would cost. The Protocol is what keeps a
 # NetworkX or Neo4j backend a drop-in rather than a rewrite.
 
+# LangGraph and Streamlit are EXTRAS, not runtime dependencies, and the split is
+# the point. The deterministic core -- ingest, the tier ladder, calibration, the
+# exception queue, and every number in EVALUATION.md -- runs on `pydantic` and
+# `rapidfuzz` alone. `ledgerloop eval`, `ablation` and `sweep` never import
+# either extra. A state machine wrapped around a finished pipeline and a
+# dashboard rendering a finished run must not be able to take that claim away.
+#
+#   graph  Step 11: the LangGraph assembly (`ledgerloop run`)
+#   ui     Step 12: the Streamlit interface (`make ui`)
+#   demo   both, which is what `make demo` needs
 [project.optional-dependencies]
+graph = ["langgraph>=1.0"]
+ui = ["streamlit>=1.40"]
+demo = ["langgraph>=1.0", "streamlit>=1.40"]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",
     "pytest-cov>=5.0",
     "mypy>=1.11",
     "ruff>=0.6",
+    "langgraph>=1.0",
+    "streamlit>=1.40",
 ]
 
 [build-system]

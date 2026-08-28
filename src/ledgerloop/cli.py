@@ -28,6 +28,13 @@ Separate commands for the same reason ``calibrate`` is separate from ``eval``.
 ``eval --ablation reports/ablation.json`` says, in the invocation, that the
 table was produced by a different run over different corpora -- and ``make
 eval`` chains all four so one command still regenerates everything.
+
+Step 11 adds ``run``: the same pipeline executed through the LangGraph state
+machine, writing a durable run record for the UI to read. It is a **separate
+command from** ``eval`` rather than a flag on it, because the two answer
+different questions -- ``eval`` regenerates the published metrics and needs no
+optional extra, ``run`` produces one inspectable, replayable reconciliation.
+Both go through the same node functions, and a test asserts they agree.
 """
 
 from __future__ import annotations
@@ -39,6 +46,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from ledgerloop.agent.graph import langgraph_available
+from ledgerloop.agent.runner import run_graph
+from ledgerloop.agent.store import RUNS_ROOT
 from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
 from ledgerloop.eval.ablation import ABLATION_LADDERS, AblationArtifact, run_ablation
 from ledgerloop.eval.baselines import run_b0, run_b1
@@ -243,6 +253,45 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("EVALUATION.md"),
         help="report destination. Regenerated in full every run and gitignored, "
         "because a committed report is one that can be quietly corrected.",
+    )
+
+    execute = subparsers.add_parser(
+        "run",
+        help="reconcile one dataset through the LangGraph pipeline and store the run",
+    )
+    execute.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="a generated dataset directory (as written by `ledgerloop generate`)",
+    )
+    execute.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help="a bundle written by `ledgerloop calibrate`. Without it the residual "
+        "tiers keep the provisional probabilities they set themselves.",
+    )
+    _add_llm_flags(execute)
+    execute.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=RUNS_ROOT,
+        help=f"where the run record is written (default {RUNS_ROOT}). One "
+        "directory per run: run.json, audit.jsonl, exceptions.json, decisions.json.",
+    )
+    execute.add_argument(
+        "--run-id",
+        default=None,
+        help="override the generated run id. The run directory is named for it, "
+        "so re-running the same id overwrites that record rather than "
+        "accumulating near-duplicates the UI would have to disambiguate.",
+    )
+    execute.add_argument(
+        "--show-nodes",
+        action="store_true",
+        help="print the node sequence the graph actually took, including every "
+        "repeat of the residual loop",
     )
 
     ablation = subparsers.add_parser(
@@ -922,6 +971,103 @@ def _load_artifacts(
     return baseline, ablation, sweep
 
 
+def _run_pipeline(args: argparse.Namespace) -> int:
+    """PLAN.md §4.1's state machine, over one dataset.
+
+    Every number printed below comes from the same
+    :class:`~ledgerloop.eval.harness.SystemRun` ``eval`` scores. The graph moves
+    data between tested functions; it computes nothing.
+    """
+    directory: Path = args.data
+    if not directory.is_dir():
+        print(f"no such dataset directory: {directory}", file=sys.stderr)
+        return 1
+    if not langgraph_available():
+        print(
+            "LangGraph is not installed. Install the extra with "
+            '`uv pip install -e ".[graph]"`. Every metric in EVALUATION.md is '
+            "produced without it -- `ledgerloop eval` needs no extra.",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = _client_for(args)
+    try:
+        bundle = _resolve_bundle(args.calibration, directory)
+    except (FileNotFoundError, StaleCalibrationError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    result = run_graph(
+        directory,
+        bundle=bundle,
+        client=client,
+        run_id=args.run_id,
+        store=args.runs_dir,
+    )
+    if not result.ok:
+        print(
+            f"run failed at node `{result.failed_node}`: {result.error}",
+            file=sys.stderr,
+        )
+        print(
+            f"  {len(result.audit.events)} audit event(s) recorded; the log is "
+            "replayable up to the failure",
+            file=sys.stderr,
+        )
+        return 1
+
+    run = result.require()
+    metrics = run.metrics
+    links = metrics.link_metrics
+    assert links is not None  # evaluate() always populates it
+
+    print(f"reconciled {directory} ({run.manifest.split.value}, seed {run.manifest.seed})")
+    print(
+        f"  graph: {len(result.node_log)} node visit(s), "
+        f"{result.residual_iterations} residual pass(es), "
+        f"{len(result.audit.events)} audit event(s) in {result.wall_clock_ms} ms"
+    )
+    if args.show_nodes:
+        for index, node in enumerate(result.node_log):
+            print(f"      {index:>2}. {node}")
+    print(
+        f"  precision {metrics.auto_match_precision:.4f} "
+        f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] - "
+        f"recall {links.recall:.4f} - match rate {metrics.match_rate:.4f}"
+    )
+    print(
+        f"      {links.true_positives} correct - {links.false_positives} false "
+        f"positives costing {format_minor(links.false_positive_cost_minor)} - "
+        f"{links.false_negatives} missed"
+    )
+    print(
+        f"  decisions on the evaluation unit: {run.auto_matched} auto-matched - "
+        f"{run.needs_review} needs review - "
+        f"{run.candidates_proposed} candidate(s) proposed"
+    )
+    print(
+        f"  exceptions: {len(run.exceptions)} raised covering "
+        f"{format_minor(sum(e.impact_minor for e in run.exceptions))} - "
+        f"recall {run.coverage.recall:.4f} over {len(run.coverage.expected)} - "
+        f"{len(run.coverage.unmatchable)} unmatchable (the honest floor)"
+    )
+    if not run.llm_available:
+        print(
+            f"  llm: disabled ({_llm_disabled_reason(args)}); every number above "
+            "is deterministic"
+        )
+    else:
+        cost = run.cost
+        print(
+            f"  llm: {cost.llm_calls} call(s) - {cost.cache_hits} cache hit(s) - "
+            f"{cost.total_tokens} tokens - equivalent paid "
+            f"₹{cost.equivalent_paid_cost_inr:.2f}"
+        )
+    print(f"  wrote {args.runs_dir / run.config.run_id}")
+    return 0
+
+
 def _run_ablation(args: argparse.Namespace) -> int:
     """PLAN.md §9.3. Six ladders, every seed, one artefact."""
     directories: list[Path] = list(args.data)
@@ -1203,6 +1349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_calibrate(args)
     if args.command == "eval":
         return _run_eval(args)
+    if args.command == "run":
+        return _run_pipeline(args)
     if args.command == "ablation":
         return _run_ablation(args)
     if args.command == "sweep":

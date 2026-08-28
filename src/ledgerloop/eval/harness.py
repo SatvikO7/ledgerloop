@@ -37,6 +37,7 @@ asserted.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,7 @@ from ledgerloop.eval.reliability import (
 from ledgerloop.eval.summary import RunSummary, summarise
 from ledgerloop.eval.truth_io import DatasetManifest, load_ground_truth, load_manifest
 from ledgerloop.exceptions import classify_exceptions, mark_resolvable, resolve_bounded
+from ledgerloop.exceptions.resolver import ResolutionOutcome
 from ledgerloop.ingest import ingest_dataset
 from ledgerloop.ingest.dataset import IngestResult
 from ledgerloop.llm.client import LLMClient
@@ -73,9 +75,12 @@ from ledgerloop.models.truth import GroundTruth
 __all__ = [
     "DEFAULT_TIERS",
     "DETERMINISTIC_TIERS",
+    "RunSetup",
     "StaleCalibrationError",
     "SystemRun",
+    "assemble_system_run",
     "load_bundle_for",
+    "prepare_run",
     "run_system",
 ]
 
@@ -187,6 +192,124 @@ class SystemRun:
         )
 
 
+@dataclass(frozen=True)
+class RunSetup:
+    """What a run needs before any node executes: the corpus and the config.
+
+    Split out of :func:`run_system` at Step 11 so the LangGraph assembly and the
+    direct call resolve their inputs the same way. Which tiers run and which
+    ``run_id`` is stamped are decided **once**, here, rather than twice with a
+    chance of disagreeing.
+    """
+
+    directory: Path
+    manifest: DatasetManifest
+    truth: GroundTruth
+    config: RunConfig
+    tiers: tuple[int, ...]
+    llm_ready: bool
+
+    @property
+    def llm_active(self) -> bool:
+        """Whether the model is both reachable and inside the enabled ladder."""
+        return self.llm_ready and 5 in self.tiers
+
+
+def prepare_run(
+    directory: Path,
+    *,
+    bundle: CalibrationBundle | None = None,
+    client: LLMClient | None = None,
+    enabled_tiers: tuple[int, ...] | None = None,
+    run_id: str | None = None,
+) -> RunSetup:
+    """Read the corpus and settle the configuration. No matching happens here.
+
+    ``enabled_tiers`` drives the ablation. ``None`` means the full ladder, with
+    T5 included only when ``client`` is enabled -- a config listing T5 on a
+    machine with no key would otherwise report a tier that never ran.
+    """
+    manifest = load_manifest(directory)
+    truth = load_ground_truth(directory)
+    tag = f"{manifest.split.value}-{manifest.seed}"
+
+    llm_ready = client is not None and client.enabled
+    requested = DEFAULT_TIERS if enabled_tiers is None else tuple(enabled_tiers)
+    tiers = requested if llm_ready else tuple(t for t in requested if t != 5)
+
+    llm_config = client.config if client is not None else LLMConfig(enabled=False)
+    config = RunConfig(
+        run_id=run_id or f"{_ladder_tag(tiers)}-{tag}",
+        split=manifest.split,
+        difficulty=manifest.difficulty,
+        seed=manifest.seed,
+        enabled_tiers=tiers,
+        llm=llm_config,
+    )
+    if bundle is not None:
+        config = configure_for(config, bundle)
+    return RunSetup(
+        directory=directory,
+        manifest=manifest,
+        truth=truth,
+        config=config,
+        tiers=tiers,
+        llm_ready=llm_ready,
+    )
+
+
+def assemble_system_run(
+    setup: RunSetup,
+    *,
+    ingested: IngestResult,
+    matched: MatchRun,
+    exceptions: Sequence[ReconException],
+    resolutions: ResolutionOutcome,
+    calibration: CalibrationEvaluation | None,
+    cost: CostLedger,
+    llm: LLMRunSummary,
+) -> SystemRun:
+    """Score a finished run and package it. **The only place a run is scored.**
+
+    Both the direct path and the LangGraph assembly end here, so a metric can
+    never differ between them by construction rather than by a test that
+    happens to pass. The test asserting the two are identical is still there;
+    this is what makes it cheap to keep true.
+    """
+    metrics = evaluate(
+        matched.predictions,
+        setup.truth,
+        run_id=setup.config.run_id,
+        wall_clock_ms=matched.wall_clock_ms,
+        tier_contributions=matched.tier_contributions,
+        exceptions=exceptions,
+        out_of_scope_refs=matched.out_of_scope_refs,
+    )
+    if calibration is not None:
+        metrics.calibration = calibration.asserted.metrics()
+    metrics.cost = cost
+
+    return SystemRun(
+        directory=setup.directory,
+        manifest=setup.manifest,
+        truth=setup.truth,
+        config=setup.config,
+        ingest=ingested,
+        matched=matched,
+        metrics=metrics,
+        exceptions=tuple(exceptions),
+        coverage=exception_coverage(
+            exceptions, setup.truth, out_of_scope=matched.out_of_scope_refs
+        ),
+        resolutions=resolutions.resolutions,
+        rounding_spent_minor=resolutions.rounding_spent_minor,
+        calibration=calibration,
+        cost=cost,
+        llm=llm,
+        llm_available=setup.llm_active,
+    )
+
+
 def run_system(
     directory: Path,
     *,
@@ -209,27 +332,18 @@ def run_system(
     row. The headline run measures it; the rows that would only re-measure it
     do not.
     """
-    manifest = load_manifest(directory)
-    truth = load_ground_truth(directory)
-    tag = f"{manifest.split.value}-{manifest.seed}"
-
-    llm_ready = client is not None and client.enabled
-    requested = DEFAULT_TIERS if enabled_tiers is None else tuple(enabled_tiers)
-    tiers = requested if llm_ready else tuple(t for t in requested if t != 5)
+    setup = prepare_run(
+        directory,
+        bundle=bundle,
+        client=client,
+        enabled_tiers=enabled_tiers,
+        run_id=run_id,
+    )
+    config, tiers, truth = setup.config, setup.tiers, setup.truth
+    llm_ready = setup.llm_ready
+    llm_config = config.llm
 
     ingested = ingest_dataset(directory, strict=False)
-
-    llm_config = client.config if client is not None else LLMConfig(enabled=False)
-    config = RunConfig(
-        run_id=run_id or f"{_ladder_tag(tiers)}-{tag}",
-        split=manifest.split,
-        difficulty=manifest.difficulty,
-        seed=manifest.seed,
-        enabled_tiers=tiers,
-        llm=llm_config,
-    )
-    if bundle is not None:
-        config = configure_for(config, bundle)
 
     # Call site 1, before matching: a narration the regex layer could not read.
     # Gated on T5 as well as on the client, because an ablation row that ran the
@@ -284,39 +398,17 @@ def run_system(
         )
 
     cost = client.ledger() if client is not None else CostLedger()
-    metrics = evaluate(
-        matched.predictions,
-        truth,
-        run_id=config.run_id,
-        wall_clock_ms=matched.wall_clock_ms,
-        tier_contributions=matched.tier_contributions,
-        exceptions=exceptions,
-        out_of_scope_refs=matched.out_of_scope_refs,
-    )
-    if calibration_view is not None:
-        metrics.calibration = calibration_view.asserted.metrics()
-    metrics.cost = cost
-
-    return SystemRun(
-        directory=directory,
-        manifest=manifest,
-        truth=truth,
-        config=config,
-        ingest=ingested,
+    return assemble_system_run(
+        setup,
+        ingested=ingested,
         matched=matched,
-        metrics=metrics,
-        exceptions=tuple(exceptions),
-        coverage=exception_coverage(
-            exceptions, truth, out_of_scope=matched.out_of_scope_refs
-        ),
-        resolutions=resolutions.resolutions,
-        rounding_spent_minor=resolutions.rounding_spent_minor,
+        exceptions=exceptions,
+        resolutions=resolutions,
         calibration=calibration_view,
         cost=cost,
         llm=LLMRunSummary(
             narration=narration, adjudication=adjudication, explanation=explanation
         ),
-        llm_available=llm_ready and 5 in tiers,
     )
 
 
