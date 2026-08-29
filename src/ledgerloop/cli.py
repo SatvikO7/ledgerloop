@@ -35,6 +35,13 @@ command from** ``eval`` rather than a flag on it, because the two answer
 different questions -- ``eval`` regenerates the published metrics and needs no
 optional extra, ``run`` produces one inspectable, replayable reconciliation.
 Both go through the same node functions, and a test asserts they agree.
+
+Step 13 adds ``demo``: generate, calibrate, reconcile, open the UI. It exists
+because ``make`` is **not** a reasonable prerequisite -- it is absent from the
+Windows machine this project is developed on, and a project whose claim is that
+it runs on nothing should not require GNU Make to be seen running. ``make demo``
+is now a one-line wrapper over this command, so there is one implementation of
+the demo and the Makefile is a convenience rather than the only door.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -254,6 +262,67 @@ def _build_parser() -> argparse.ArgumentParser:
         help="report destination. Regenerated in full every run and gitignored, "
         "because a committed report is one that can be quietly corrected.",
     )
+
+    demo = subparsers.add_parser(
+        "demo",
+        help="the whole thing: generate, calibrate, reconcile, open the UI",
+    )
+    demo.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/generated"),
+        help="where the generated corpora go (default data/generated, gitignored)",
+    )
+    demo.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=RUNS_ROOT,
+        help=f"where the run record is written (default {RUNS_ROOT})",
+    )
+    demo.add_argument(
+        "--bundle",
+        type=Path,
+        default=Path("reports/calibration.json"),
+        help="where the fitted calibration bundle is written and read",
+    )
+    demo.add_argument(
+        "--seed", type=int, default=42, help="seed for the demonstrated corpus"
+    )
+    demo.add_argument(
+        "--difficulty",
+        type=Difficulty,
+        choices=list(Difficulty),
+        default=Difficulty.STANDARD,
+        help="anomaly prevalence dial for the demonstrated corpus",
+    )
+    demo.add_argument(
+        "--split",
+        type=SplitName,
+        choices=list(SplitName),
+        default=SplitName.DEV,
+        help="which split to reconcile. `dev` is 60 orders -- the challenge asks "
+        "for a 50+ record batch and it reconciles in seconds, so the demo starts "
+        "immediately. The UI's Run tab opens any other corpus on disk.",
+    )
+    demo.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="regenerate corpora that already exist. Off by default: generation "
+        "is a pure function of (seed, split, difficulty), so an existing "
+        "directory holds byte-identical data and rewriting it buys nothing.",
+    )
+    demo.add_argument(
+        "--refit",
+        action="store_true",
+        help="refit the calibration bundle even if one is already on disk",
+    )
+    demo.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="stop after the reconciliation and print the UI command instead of "
+        "launching it. What CI and the smoke test use.",
+    )
+    _add_llm_flags(demo)
 
     execute = subparsers.add_parser(
         "run",
@@ -650,38 +719,6 @@ def _resolve_bundle(path: Path | None, directory: Path) -> CalibrationBundle | N
     return load_bundle_for(path, load_manifest(directory))
 
 
-def _print_run(run: SystemRun) -> None:
-    """The per-run block every command that runs the pipeline prints."""
-    matched = run.matched
-    links = run.metrics.link_metrics
-    assert links is not None  # evaluate() always populates it
-    print(
-        f"  {run.label}: precision {run.metrics.auto_match_precision:.4f} "
-        f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] - "
-        f"recall {links.recall:.4f} - match rate {run.metrics.match_rate:.4f}"
-    )
-    print(
-        f"      {links.true_positives} correct - {links.false_positives} false positives "
-        f"costing {format_minor(links.false_positive_cost_minor)} - "
-        f"{links.false_negatives} missed - {run.candidates_proposed} candidates "
-        f"proposed on the evaluation unit"
-    )
-    print(
-        f"      exceptions {len(run.exceptions)} raised - recall "
-        f"{run.coverage.recall:.4f} over {len(run.coverage.expected)} - "
-        f"unmatchable coverage {run.coverage.unmatchable_recall:.4f} over "
-        f"{len(run.coverage.unmatchable)}"
-    )
-    if run.llm_available:
-        cost = run.cost
-        print(
-            f"      llm {cost.llm_calls} call(s) - {cost.cache_hits} hit(s) - "
-            f"{cost.total_tokens} tokens - equivalent paid "
-            f"₹{cost.equivalent_paid_cost_inr:.2f}"
-        )
-    del matched
-
-
 def _negative_counters(run: SystemRun) -> tuple[tuple[str, str, int], ...]:
     """The tiers' own account of what they refused, and why.
 
@@ -969,6 +1006,218 @@ def _load_artifacts(
     assert ablation is None or isinstance(ablation, AblationArtifact)
     assert sweep is None or isinstance(sweep, SweepArtifact)
     return baseline, ablation, sweep
+
+
+#: The corpora the calibration bundle is fitted from.
+#:
+#: Five ``train`` seeds and four ``calibration`` seeds, disjoint, and neither is
+#: ever ``test`` -- ``CalibrationProvenance`` refuses to construct a bundle that
+#: breaks either rule. The same seeds the Makefile uses, declared here as data so
+#: the two cannot drift.
+DEMO_TRAIN_SEEDS: tuple[int, ...] = (42, 43, 44, 45, 46)
+DEMO_CALIBRATION_SEEDS: tuple[int, ...] = (47, 48, 49, 50)
+
+
+def _generate_if_absent(
+    directory: Path, config: GeneratorConfig, *, regenerate: bool
+) -> bool:
+    """Generate one corpus unless it is already there. Returns whether it ran.
+
+    Generation is a pure function of ``(seed, split, difficulty, order_count)``,
+    so an existing directory holds byte-identical data and rewriting it buys
+    nothing but wall clock. ``--regenerate`` forces it for anyone who wants to
+    watch that claim hold.
+    """
+    if directory.is_dir() and (directory / "manifest.json").is_file() and not regenerate:
+        return False
+    generate_to_disk(config, directory)
+    return True
+
+
+def _run_demo(args: argparse.Namespace) -> int:
+    """Generate, calibrate, reconcile, then open the UI.
+
+    Every stage is the same command a reader can run on its own -- this chains
+    them rather than reimplementing any of them, and prints each underlying
+    invocation so the demo teaches the CLI instead of hiding it.
+    """
+    data_dir: Path = args.data_dir
+    corpus = data_dir / f"{args.split.value}-{args.difficulty.value}-{args.seed}"
+
+    print("LedgerLoop demo")
+    print("  1. generate    three heterogeneous sources plus link-level ground truth")
+    print("  2. calibrate   fit the blender and tau_high on train + calibration")
+    print("  3. reconcile   run the LangGraph pipeline over the demo corpus")
+    print("  4. inspect     open the four screens")
+    print()
+
+    # --- 1. generate -------------------------------------------------------
+    print("[1/4] generating corpora")
+    generated = 0
+    for seed in DEMO_TRAIN_SEEDS:
+        target = data_dir / f"train-standard-{seed}"
+        generated += _generate_if_absent(
+            target,
+            GeneratorConfig(split=SplitName.TRAIN, seed=seed),
+            regenerate=args.regenerate,
+        )
+    for seed in DEMO_CALIBRATION_SEEDS:
+        target = data_dir / f"calibration-standard-{seed}"
+        generated += _generate_if_absent(
+            target,
+            GeneratorConfig(split=SplitName.CALIBRATION, seed=seed),
+            regenerate=args.regenerate,
+        )
+    generated += _generate_if_absent(
+        corpus,
+        GeneratorConfig(
+            split=args.split, difficulty=args.difficulty, seed=args.seed
+        ),
+        regenerate=args.regenerate,
+    )
+    total = len(DEMO_TRAIN_SEEDS) + len(DEMO_CALIBRATION_SEEDS) + 1
+    print(
+        f"      {generated} generated, {total - generated} already present "
+        f"(generation is a pure function of the seed, so an existing corpus is "
+        f"byte-identical)"
+    )
+    truth = load_ground_truth(corpus)
+    print(
+        f"      demo corpus {corpus}: {len(truth.records)} records, "
+        f"{len(truth.evaluation_pairs)} evaluation links, "
+        f"{len(truth.unmatchable_refs)} unmatchable by construction"
+    )
+
+    # --- 2. calibrate ------------------------------------------------------
+    bundle_path: Path = args.bundle
+    print()
+    print("[2/4] fitting the calibration bundle")
+    if bundle_path.is_file() and not args.refit:
+        print(f"      {bundle_path} already exists (pass --refit to redo it)")
+    else:
+        config = RunConfig(run_id="demo-calibrate", split=SplitName.TRAIN)
+        try:
+            bundle = fit_from_corpora(
+                harvest_corpora(
+                    [data_dir / f"train-standard-{s}" for s in DEMO_TRAIN_SEEDS],
+                    config=config,
+                ),
+                harvest_corpora(
+                    [
+                        data_dir / f"calibration-standard-{s}"
+                        for s in DEMO_CALIBRATION_SEEDS
+                    ],
+                    config=config,
+                ),
+                target_precision=config.thresholds.target_auto_match_precision,
+            )
+        except (FittingError, ValueError) as exc:
+            print(f"calibration refused: {exc}", file=sys.stderr)
+            return 1
+        bundle.save(bundle_path)
+        selection = bundle.thresholds
+        print(
+            f"      wrote {bundle_path}: tau_high = {selection.tau_high:.6f}, "
+            f"fitted on {bundle.provenance.calibration_split.value} seeds "
+            + ", ".join(str(s) for s in bundle.provenance.calibration_seeds)
+        )
+        print(
+            f"      achieved precision {selection.achieved_precision:.4f} "
+            f"[{selection.precision_ci_low:.4f}, {selection.precision_ci_high:.4f}] "
+            f"on {selection.auto_matched} calibration links "
+            f"({selection.false_positives} wrong)"
+        )
+    print("      the `test` split is never fitted on; the bundle's provenance says so")
+
+    # --- 3. reconcile ------------------------------------------------------
+    print()
+    print("[3/4] reconciling")
+    if not langgraph_available():
+        print(
+            "LangGraph is not installed. Install the demo extra with "
+            '`uv pip install -e ".[demo]"`, or run `ledgerloop eval` which '
+            "needs no extra.",
+            file=sys.stderr,
+        )
+        return 1
+    client = _client_for(args)
+    try:
+        bundle_for_run = _resolve_bundle(bundle_path, corpus)
+    except (FileNotFoundError, StaleCalibrationError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    result = run_graph(corpus, bundle=bundle_for_run, client=client, store=args.runs_dir)
+    if not result.ok:
+        print(
+            f"the run failed at node `{result.failed_node}`: {result.error}",
+            file=sys.stderr,
+        )
+        return 1
+
+    run = result.require()
+    metrics = run.metrics
+    links = metrics.link_metrics
+    assert links is not None  # evaluate() always populates it
+    print(
+        f"      {len(result.node_log)} node visit(s), "
+        f"{result.residual_iterations} residual pass(es), "
+        f"{len(result.audit.events)} audit event(s) in {result.wall_clock_ms} ms"
+    )
+    print(
+        f"      precision {metrics.auto_match_precision:.4f} "
+        f"[{links.precision_ci_low:.4f}, {links.precision_ci_high:.4f}] - "
+        f"recall {links.recall:.4f} - match rate {metrics.match_rate:.4f}"
+    )
+    print(
+        f"      {links.true_positives} correct - {links.false_positives} false "
+        f"positives costing {format_minor(links.false_positive_cost_minor)} - "
+        f"{links.false_negatives} missed"
+    )
+    print(
+        f"      {len(run.exceptions)} exception(s) covering "
+        f"{format_minor(sum(e.impact_minor for e in run.exceptions))}, "
+        f"exception recall {run.coverage.recall:.4f} over "
+        f"{len(run.coverage.expected)} - {len(run.coverage.unmatchable)} "
+        "unmatchable (the honest floor)"
+    )
+    if not run.llm_available:
+        print(
+            f"      llm: disabled ({_llm_disabled_reason(args)}); every number "
+            "above is deterministic"
+        )
+    else:
+        cost = run.cost
+        print(
+            f"      llm: {cost.llm_calls} call(s), {cost.total_tokens} tokens, "
+            f"equivalent paid ₹{cost.equivalent_paid_cost_inr:.2f}. It proposed; "
+            "it never decided and never did arithmetic."
+        )
+    print(f"      wrote {args.runs_dir / run.config.run_id}")
+
+    # --- 4. the UI ---------------------------------------------------------
+    print()
+    print("[4/4] the four screens")
+    # Located by path rather than by import: importing the module would make
+    # Streamlit a hard dependency of the CLI, and `ledgerloop eval` must keep
+    # working without either optional extra.
+    app = Path(__file__).resolve().parent / "ui" / "app.py"
+    if args.no_ui:
+        print("      skipped (--no-ui). Open them with:")
+        print(f"          {Path(sys.executable).name} -m streamlit run {app}")
+        return 0
+    print("      opening Streamlit. Ctrl-C to stop.")
+    print(
+        "      Run · Results · Exceptions · Audit replay. Every number is read "
+        "from the run record; the UI computes nothing."
+    )
+    print()
+    try:
+        return subprocess.call(
+            [sys.executable, "-m", "streamlit", "run", str(app)]
+        )
+    except KeyboardInterrupt:  # pragma: no cover - interactive
+        return 0
 
 
 def _run_pipeline(args: argparse.Namespace) -> int:
@@ -1351,6 +1600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_eval(args)
     if args.command == "run":
         return _run_pipeline(args)
+    if args.command == "demo":
+        return _run_demo(args)
     if args.command == "ablation":
         return _run_ablation(args)
     if args.command == "sweep":

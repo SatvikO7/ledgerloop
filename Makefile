@@ -1,9 +1,16 @@
 # LedgerLoop
 #
-# Only targets that work today are listed. `demo` arrives with the step that
-# implements it, rather than sitting here failing.
+# Only targets that work today are listed.
+#
+# `make` is a convenience here, not a prerequisite. Every target below is a
+# one-line wrapper around a `ledgerloop` subcommand, and DEMO.md gives the same
+# commands verbatim -- because GNU Make is absent from a default Windows install
+# (including the machine this was built on), and a project whose claim is that it
+# runs on nothing should not require Make to be seen running.
 
-PY := .venv/Scripts/python.exe
+# The venv's interpreter, on either layout: Scripts/ on Windows, bin/ elsewhere.
+VENV := .venv
+PY   := $(if $(wildcard $(VENV)/Scripts/python.exe),$(VENV)/Scripts/python.exe,$(VENV)/bin/python)
 
 .PHONY: help install install-demo test cov lint typecheck check data sweep-data \
         fixtures ingest calibrate ablation sweep baseline-llm eval run demo ui
@@ -15,8 +22,8 @@ help:
 	@echo "lint         ruff"
 	@echo "typecheck    mypy --strict"
 	@echo "check        lint + typecheck + cov"
-	@echo "data         generate every split at standard difficulty (gitignored)"
-	@echo "sweep-data   generate the 5-seed x 3-difficulty test corpora"
+	@echo "data         generate the corpora eval needs (gitignored)"
+	@echo "sweep-data   add the easy/hard test corpora the difficulty sweep needs"
 	@echo "fixtures     regenerate the committed 60-order fixture set"
 	@echo "ingest       parse and normalise the committed fixture set"
 	@echo "calibrate    fit the blender, isotonic and tau_high (train + calibration)"
@@ -25,7 +32,7 @@ help:
 	@echo "baseline-llm B2, on dev only (PLAN.md 9.2). The only target that can call out."
 	@echo "eval         regenerate everything and write EVALUATION.md"
 	@echo ""
-	@echo "demo         generate data, calibrate, reconcile, then open the UI"
+	@echo "demo         generate, calibrate, reconcile, then open the UI (~10s)"
 	@echo "run          reconcile one dataset through the LangGraph pipeline"
 	@echo "ui           open the Streamlit interface over the runs already stored"
 
@@ -82,17 +89,20 @@ ABLATION    := reports/ablation.json
 SWEEP       := reports/sweep.json
 B2          := reports/llm_baseline.json
 
+# Everything the fit and the ablation need: the demo corpus, the two fitting
+# halves, and the five standard-difficulty `test` seeds.
 data:
 	$(PY) -m ledgerloop.cli generate --split dev  --seed 42
 	$(foreach s,$(TRAIN_SEEDS),$(PY) -m ledgerloop.cli generate --split train --seed $(s);)
 	$(foreach s,$(CAL_SEEDS),$(PY) -m ledgerloop.cli generate --split calibration --seed $(s);)
+	$(foreach s,$(EVAL_SEEDS),$(PY) -m ledgerloop.cli generate --split test --seed $(s);)
 
-# The difficulty dial changes how much goes wrong without changing what goes
-# wrong, so the three difficulties are comparable to each other. Fifteen corpora
-# rather than one: PLAN.md 9.4 asks for mean +/- std, and a single run's number
-# is noise.
+# The other two difficulties, which only the sweep needs. The dial changes how
+# much goes wrong without changing what goes wrong, so the three columns are
+# comparable to each other. Ten more corpora rather than none: PLAN.md 9.4 asks
+# for mean +/- std across difficulties, and a single run's number is noise.
 sweep-data: data
-	$(foreach d,$(DIFFICULTIES),$(foreach s,$(EVAL_SEEDS),\
+	$(foreach d,easy hard,$(foreach s,$(EVAL_SEEDS),\
 		$(PY) -m ledgerloop.cli generate --split test --difficulty $(d) --seed $(s);))
 
 # The fixture set is the exception: its job is to exercise every code path, not
@@ -107,7 +117,7 @@ ingest:
 
 # The fit is a separate command from the report on purpose: the split discipline
 # has to be visible in the invocation. Nothing here names `test`.
-calibrate: sweep-data
+calibrate: data
 	$(PY) -m ledgerloop.cli calibrate \
 		--train $(TRAIN_DIRS) \
 		--calibration $(CAL_DIRS) \
@@ -124,7 +134,7 @@ ablation: calibrate
 
 # PLAN.md 9.4. The headline configuration, five seeds, three difficulties. One
 # bundle across all of them -- a deployed system has one threshold.
-sweep: calibrate
+sweep: calibrate sweep-data
 	$(PY) -m ledgerloop.cli sweep \
 		--data $(SWEEP_DIRS) \
 		--calibration $(BUNDLE) \
@@ -155,25 +165,27 @@ baseline-llm: calibrate
 # decisions.json. The same numbers `eval` reports -- both paths call the same
 # node functions and the same scorer.
 run: calibrate
-	$(PY) -m ledgerloop.cli run 		--data $(HEADLINE) 		--calibration $(BUNDLE) 		--show-nodes
+	$(PY) -m ledgerloop.cli run \
+		--data $(HEADLINE) \
+		--calibration $(BUNDLE) \
+		--show-nodes
 
 # Step 12. The four screens, over whatever runs are already in reports/runs/.
 # Reads; never computes. Ctrl-C to stop.
 ui:
 	$(PY) -m streamlit run src/ledgerloop/ui/app.py
 
-# The one command a reviewer needs. Generates the corpora, fits the calibration
-# bundle on train/calibration (never on test), reconciles the 60-order dev
-# corpus through the graph, and opens the UI on the result.
+# The one command a reviewer needs, and a one-line wrapper on purpose: the demo
+# is `ledgerloop demo`, so it works identically with or without Make. It
+# generates only what it needs (the demo corpus plus the two fitting halves),
+# fits the bundle on train/calibration -- never on test -- reconciles through
+# the LangGraph pipeline, and opens the four screens. About ten seconds from a
+# clean checkout.
 #
-# `dev` rather than `test`: the challenge asks for a 50+ record batch, 60 orders
-# is that, and it reconciles in under a second so the demo starts immediately.
-# Point the UI at any larger dataset from the Run tab once it is open.
-demo: calibrate
-	$(PY) -m ledgerloop.cli run 		--data $(DEV) 		--calibration $(BUNDLE) 		--show-nodes
-	@echo ""
-	@echo "Opening the UI. The Run tab reconciles any other dataset on disk."
-	$(PY) -m streamlit run src/ledgerloop/ui/app.py
+# No prerequisite target: the command skips corpora that already exist, so it is
+# safe to re-run and does not drag in the eval-only datasets.
+demo:
+	$(PY) -m ledgerloop.cli demo
 
 # PLAN.md 9.4: every reported number comes from `test`, and every number is
 # regenerated by one command. Generation, the fit, the ablation, the sweep and
