@@ -17,8 +17,14 @@ import pytest
 
 from ledgerloop.agent.graph import langgraph_available
 from ledgerloop.agent.store import list_runs, load_run
-from ledgerloop.cli import DEMO_CALIBRATION_SEEDS, DEMO_TRAIN_SEEDS, main
+from ledgerloop.cli import (
+    DEMO_CALIBRATION_SEEDS,
+    DEMO_TRAIN_SEEDS,
+    _build_parser,
+    main,
+)
 from ledgerloop.matching.calibration import CalibrationBundle
+from ledgerloop.models.enums import SplitName
 
 pytestmark = pytest.mark.skipif(
     not langgraph_available(), reason="langgraph is an optional extra"
@@ -72,7 +78,7 @@ class TestItRunsEndToEnd:
             assert (data / f"train-standard-{seed}" / "manifest.json").is_file()
         for seed in DEMO_CALIBRATION_SEEDS:
             assert (data / f"calibration-standard-{seed}" / "manifest.json").is_file()
-        assert (data / "dev-standard-42" / "manifest.json").is_file()
+        assert (data / "test-standard-42" / "manifest.json").is_file()
 
     def test_it_does_not_generate_the_eval_only_corpora(self, completed):
         """The demo needs the demo corpus and the two fitting halves. Dragging
@@ -105,13 +111,13 @@ class TestItRunsEndToEnd:
         assert stored.summary["engine"] == "langgraph"
 
     def test_the_run_carries_the_four_files(self, completed):
-        directory = (completed / "runs" / "t0t4-dev-42")
+        directory = (completed / "runs" / "t0t4-test-42")
         for name in ("run.json", "audit.jsonl", "exceptions.json", "decisions.json"):
             assert (directory / name).is_file()
 
     def test_the_demo_run_makes_no_wrong_auto_match(self, completed):
         """The headline claim, on the corpus the demo actually shows."""
-        stored = load_run(completed / "runs" / "t0t4-dev-42")
+        stored = load_run(completed / "runs" / "t0t4-test-42")
         assert stored is not None
         assert stored.metrics["false_positives"] == 0
         assert stored.metrics["false_positive_cost_minor"] == 0
@@ -120,14 +126,14 @@ class TestItRunsEndToEnd:
     def test_it_ran_deterministically(self, completed):
         """No key in the test environment, so the demo must report a run with no
         model rather than silently behaving as though one were present."""
-        stored = load_run(completed / "runs" / "t0t4-dev-42")
+        stored = load_run(completed / "runs" / "t0t4-test-42")
         assert stored is not None
         assert stored.summary["llm"]["available"] is False
         assert stored.summary["llm"]["calls"] == 0
         assert stored.summary["llm"]["total_tokens"] == 0
 
     def test_it_reports_the_unmatchable_floor_rather_than_hiding_it(self, completed):
-        stored = load_run(completed / "runs" / "t0t4-dev-42")
+        stored = load_run(completed / "runs" / "t0t4-test-42")
         assert stored is not None
         assert stored.metrics["unmatchable_count"] > 0
         assert stored.summary["coverage"]["unmatchable"] > 0
@@ -147,11 +153,11 @@ class TestItIsIdempotent:
         assert "already exists" in capsys.readouterr().out
 
     def test_and_produces_the_same_numbers(self, completed):
-        before = load_run(completed / "runs" / "t0t4-dev-42")
+        before = load_run(completed / "runs" / "t0t4-test-42")
         assert before is not None
         first = dict(before.metrics)
         assert _demo(completed) == 0
-        after = load_run(completed / "runs" / "t0t4-dev-42")
+        after = load_run(completed / "runs" / "t0t4-test-42")
         assert after is not None
         # Wall clock is measured and legitimately moves; nothing else may.
         for key, value in first.items():
@@ -212,11 +218,11 @@ class TestItChainsRatherThanReimplements:
         from ledgerloop.eval.harness import load_bundle_for, run_system
         from ledgerloop.eval.truth_io import load_manifest
 
-        corpus = completed / "data" / "dev-standard-42"
+        corpus = completed / "data" / "test-standard-42"
         bundle = load_bundle_for(completed / "calibration.json", load_manifest(corpus))
         direct = run_system(corpus, bundle=bundle, measure_calibration_quality=True)
 
-        stored = load_run(completed / "runs" / "t0t4-dev-42")
+        stored = load_run(completed / "runs" / "t0t4-test-42")
         assert stored is not None
         assert stored.metrics["auto_match_precision"] == direct.metrics.auto_match_precision
         assert stored.metrics["match_rate"] == direct.metrics.match_rate
@@ -230,3 +236,49 @@ class TestItChainsRatherThanReimplements:
         assert DEMO_TRAIN_SEEDS == (42, 43, 44, 45, 46)
         assert DEMO_CALIBRATION_SEEDS == (47, 48, 49, 50)
         assert not set(DEMO_TRAIN_SEEDS) & set(DEMO_CALIBRATION_SEEDS)
+
+
+class TestItOpensOnTheCorpusTheDocumentsQuote:
+    """Phase 2.1, audit item 4. The most avoidable objection there is.
+
+    Before this the demo opened on `dev`: 60 orders, recall 0.32, and an
+    exception recall of 100% resting on **five records**. A reviewer would have
+    seen the project's least meaningful numbers on screen and been unable to
+    find any of them in README.md or EVALUATION.md, both of which are measured
+    on `test`. Nothing was wrong with either document; the demo simply pointed
+    somewhere else.
+    """
+
+    def test_the_default_split_is_test(self):
+        """One flag, and it is the difference between a demo that corroborates
+        the documents and one that quietly contradicts them."""
+        namespace = _build_parser().parse_args(["demo"])
+        assert namespace.split is SplitName.TEST
+
+    def test_dev_is_still_reachable_for_a_faster_run(self):
+        namespace = _build_parser().parse_args(["demo", "--split", "dev"])
+        assert namespace.split is SplitName.DEV
+
+    def test_the_run_it_stores_is_the_corpus_every_published_number_uses(
+        self, completed
+    ):
+        stored = load_run(completed / "runs" / "t0t4-test-42")
+        assert stored is not None
+        assert stored.summary["dataset"]["split"] == "test"
+        assert stored.summary["dataset"]["seed"] == 42
+
+    def test_its_numbers_are_the_single_seed_ones_the_report_publishes(
+        self, completed
+    ):
+        """Not the multi-seed means -- those are in EVALUATION.md and are what a
+        claim should quote -- but the seed-42 figures the report's single-seed
+        tables carry, so a reviewer can find every number on screen in the
+        document.
+        """
+        stored = load_run(completed / "runs" / "t0t4-test-42")
+        assert stored is not None
+        assert stored.metrics["auto_match_precision"] == 1.0
+        assert stored.metrics["true_positives"] == 248
+        assert stored.metrics["false_positives"] == 0
+        assert stored.metrics["false_negatives"] == 46
+        assert stored.metrics["match_rate"] == pytest.approx(0.7971, abs=5e-5)

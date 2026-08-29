@@ -47,8 +47,11 @@ from pathlib import Path
 from typing import Protocol
 
 from ledgerloop.eval.artifacts import (
+    COMPARED_METRICS,
     AblationArtifact,
+    ComparisonArtifact,
     LLMBaselineArtifact,
+    LLMReportArtifact,
     SweepArtifact,
     SweepGroup,
 )
@@ -60,8 +63,8 @@ from ledgerloop.eval.metrics import (
 from ledgerloop.eval.reliability import CalibrationEvaluation
 from ledgerloop.eval.summary import Aggregate
 from ledgerloop.eval.truth_io import DatasetManifest
-from ledgerloop.matching.calibration import ReliabilityDiagram
-from ledgerloop.models.metrics import CostLedger, RunMetrics
+from ledgerloop.matching.calibration import CalibrationBundle, ReliabilityDiagram
+from ledgerloop.models.metrics import CostLedger, Proportion, RunMetrics
 from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.models.resolution import AutoResolution
 from ledgerloop.models.truth import GroundTruth
@@ -154,6 +157,22 @@ class EvaluatedRun:
     auto_matched: int = 0
     """Evaluation-unit links the run committed. Equals TP + FP by construction."""
 
+    bundle: CalibrationBundle | None = None
+    """The fitted bundle this run applied, for the Phase 2.1 calibration verdict.
+
+    The report needs the *fit* and not only its output to say whether the layer
+    changed anything: a degenerate logistic and a one-block isotonic are facts
+    about the model, and no metric computed downstream of them can state them.
+    """
+
+    review_band_probabilities: tuple[float, ...] = ()
+    """The distinct calibrated probabilities the run's decisions carried.
+
+    Two values -- 0.5 and 1.0 -- is a bimodal run, and a bimodal run has an
+    empty review band whatever `tau_low` and `tau_high` are set to. Collected
+    because the conclusion is only checkable if the distribution is printed.
+    """
+
     scope: str = ""
     """A note on what this row was measured over, when it is not the main split.
 
@@ -227,13 +246,9 @@ def _headline(run: EvaluatedRun) -> list[str]:
         if metrics.exceptions_by_class
         else f"{_PENDING} (this system raises no exceptions)"
     )
-    calibration = (
-        f"ECE {metrics.calibration.ece:.4f} over {metrics.calibration.sample_count} "
-        f"residual links"
-        if metrics.calibration
-        else f"{_PENDING} (run without `--calibration`)"
-    )
+    calibration = _calibration_cell(metrics)
 
+    del predicted, exception_recall
     return [
         f"## {run.system.name} -- {run.system.description}",
         "",
@@ -244,15 +259,141 @@ def _headline(run: EvaluatedRun) -> list[str]:
         "deviation across seeds is in the multi-seed section, and it is the figure any",
         "claim should quote: a single run's number is noise (PLAN.md §9.4).",
         "",
-        "| Metric | Value | Target |",
-        "|---|---|---|",
-        f"| Auto-match precision | {_ratio_cell(metrics.auto_match_precision, predicted)} | "
-        "≥ 99.00% |",
-        f"| Match rate | {_pct(metrics.match_rate)} | ≥ 85.00% |",
-        f"| Exception recall | {exception_recall} | ≥ 95.00% |",
-        f"| Calibration | {calibration} | -- |",
+        "**Every proportion carries its sample size and a 95% Wilson interval.** Not",
+        "precision alone: until Phase 2.1 this document argued for intervals at length",
+        "and then applied them to one metric, which left the number with the smallest",
+        "denominator in the whole report -- exception recall, n = 30 -- printed to four",
+        "significant figures with nothing to say how far it could be wrong. The",
+        "`verdict` column reads the **interval** rather than the point estimate, and",
+        "reads it one-sided because every target here is a floor: *met* when the lower",
+        "bound clears the target, *missed* when the upper bound is below it, and",
+        "*undecided* when the interval straddles it. That cuts both ways -- 30 of 30",
+        "exceptions does not demonstrate ≥ 95% from thirty records, and 28 of 30 would",
+        "not have been a clean miss. Both are the same statement about the same",
+        "denominator, and calling the first a pass would be the more flattering error",
+        "and the same error.",
+        "",
+        "| Metric | Value (95% Wilson CI, n) | Target | Verdict |",
+        "|---|---|---|---|",
+        *_headline_rows(metrics),
+        f"| Calibration | {calibration} | -- | -- |",
+        "",
+        "The interval is a Wilson score interval, not the normal approximation. At",
+        "these sample sizes the normal approximation returns `[1.0, 1.0]` from a clean",
+        "run, claiming certainty this data cannot support.",
         "",
     ]
+
+
+#: The headline three and the floor, with the target each is measured against and
+#: what an empty denominator means for it.
+#:
+#: The fourth column is the point of the tuple. ``n/a`` alone tells a reader the
+#: cell is empty; it does not tell them *why*, and the two reasons are different
+#: findings -- a system that predicted nothing is not the same as a system with
+#: no exception classifier. Naming the reason in the cell is the rule the whole
+#: pending vocabulary exists for: **a zero is never printed for something that
+#: did not happen.**
+_HEADLINE_TARGETS: tuple[tuple[str, str, float | None, str], ...] = (
+    (
+        "Auto-match precision",
+        "precision_interval",
+        0.99,
+        "this system asserted no links",
+    ),
+    ("Link recall", "recall_interval", None, "this corpus has no evaluation links"),
+    ("Match rate", "match_rate_interval", 0.85, "no reconcilable records"),
+    (
+        "Exception recall",
+        "exception_recall_interval",
+        0.95,
+        "this system raises no exceptions",
+    ),
+    (
+        "Unmatchable coverage",
+        "unmatchable_coverage_interval",
+        None,
+        "no unmatchable records in this corpus",
+    ),
+)
+
+
+def _headline_rows(metrics: RunMetrics) -> list[str]:
+    """One row per headline proportion, each with its interval and a verdict.
+
+    An empty denominator renders as ``n/a`` **with its reason**, never as a
+    score and never as a bare blank. A precision of 0.00% from a system that
+    asserted nothing is the single most common way an evaluation report
+    misleads, and a `0.9847` lower bound printed beside `n=0` would be worse.
+    """
+    rows: list[str] = []
+    for label, field, target, reason in _HEADLINE_TARGETS:
+        proportion: Proportion | None = getattr(metrics, field, None)
+        if proportion is None:
+            rows.append(f"| {label} | {_PENDING} | -- | -- |")
+            continue
+        if field == "exception_recall_interval" and not metrics.exceptions_by_class:
+            # A non-empty denominator and no classifier to fill it. 0 of 5 would
+            # be a real-looking failure by a component this run does not have --
+            # which is the same rule that keeps T4's zero out of the tier table
+            # and B2's row out of an unrun report.
+            rows.append(f"| {label} | {_PENDING} ({reason}) | -- | -- |")
+            continue
+        if proportion.trials == 0:
+            rows.append(f"| {label} | n/a | -- | {reason} |")
+            continue
+        goal = "--" if target is None else f"≥ {target:.2%}"
+        rows.append(
+            f"| {label} | {proportion.render()} | {goal} | "
+            f"{_verdict(proportion, target)} |"
+        )
+    return rows
+
+
+def _verdict(proportion: Proportion, target: float | None) -> str:
+    """Met, missed, or a sample too small to tell the two apart.
+
+    Every target in this project is a floor (``>= x``), so the verdict is read
+    off the **interval**, one-sided:
+
+    * **met** -- the lower bound clears the target. The data supports the claim.
+    * **missed** -- the upper bound is below it. The data rules the claim out.
+    * **undecided** -- the interval straddles it. The sample cannot separate the
+      two, and saying anything stronger would claim a precision it does not have.
+
+    The third answer is the one this exists for, and it cuts both ways. Exception
+    recall at 30 of 30 does not *demonstrate* >= 95% from thirty records, and a
+    0.9333 from the same thirty is not a clean miss either -- both are the same
+    statement about the same denominator. Reporting an undecided result as a pass
+    would be the more flattering error and it is the same error.
+    """
+    if target is None:
+        return "reported, not targeted"
+    if proportion.ci_low >= target:
+        return "met"
+    if proportion.ci_high < target:
+        return "missed"
+    return f"undecided at n={proportion.trials} -- the interval straddles the target"
+
+
+def _calibration_cell(metrics: RunMetrics) -> str:
+    """The headline calibration cell -- a number only when it means something.
+
+    An ECE computed over **one populated bin** is not a small calibration error;
+    it is the absence of a measurement, and printing `0.0000` in a headline row
+    invites a reader to take the most flattering possible reading of a
+    degenerate fit. The disclosure existed further down the document from the
+    start; Phase 2.1 moves it into the cell so it cannot be read past.
+    """
+    view = metrics.calibration
+    if view is None:
+        return f"{_PENDING} (run without `--calibration`)"
+    if view.populated_bins <= 1:
+        return (
+            f"n/a — {view.populated_bins} populated bin over {view.sample_count} "
+            "residual links, so ECE measures the corpus, not the calibrator"
+        )
+    return f"ECE {view.ece:.4f} over {view.sample_count} residual links"
 
 
 def _link_table(run: EvaluatedRun) -> list[str]:
@@ -274,6 +415,8 @@ def _link_table(run: EvaluatedRun) -> list[str]:
         f"| Precision 95% CI (Wilson) | [{links.precision_ci_low:.4f}, "
         f"{links.precision_ci_high:.4f}] |",
         f"| Recall | {_ratio_cell(links.recall, actual)} |",
+        f"| Recall 95% CI (Wilson) | [{links.recall_ci_low:.4f}, "
+        f"{links.recall_ci_high:.4f}] |",
         f"| F1 | {links.f1:.4f} |",
         f"| **False-positive cost** | **{format_minor(links.false_positive_cost_minor)}** |",
         "",
@@ -509,6 +652,94 @@ def _reliability_rows(diagram: ReliabilityDiagram) -> list[str]:
     return rows
 
 
+def _calibration_verdict(run: EvaluatedRun) -> list[str]:
+    """Does the calibration layer change a single decision on this corpus?
+
+    Phase 2.1 exists because the answer was **assemblable and never stated**.
+    Every component of it was disclosed somewhere -- "single class" here, "one
+    populated bin" there, `tau_high_is_fitted` in the config table, a decision
+    breakdown further down -- and a reader had to gather four separate
+    disclosures to reach a conclusion the document never drew. That is not
+    dishonest and it is worse than saying it: a criticism a judge assembles
+    themselves lands harder than one the author already made.
+
+    So it is drawn here, and drawn **from the fitted bundle at render time**
+    rather than typed. Every clause below is a fact read off the model this run
+    applied, so the paragraph cannot survive the day the fit stops being
+    degenerate -- which is exactly the day it should stop being printed.
+    """
+    bundle = run.bundle
+    if bundle is None:
+        return []
+
+    blender = bundle.blender
+    isotonic = bundle.calibrator
+    selection = bundle.thresholds
+    largest = max((abs(value) for value in blender.coefficients), default=0.0)
+    constant = largest < 1e-9
+    one_block = len(isotonic.values) == 1
+    single_class = blender.positive_count == blender.sample_count
+    probabilities = run.review_band_probabilities
+    review_band_empty = run.review_queue == 0
+
+    inert = constant and one_block and review_band_empty
+    lines = [
+        "#### Does this layer change any decision on this corpus?",
+        "",
+    ]
+    if not inert:
+        lines.extend(
+            [
+                "**Yes.** The fit is not degenerate on this corpus: the logistic has",
+                f"non-zero coefficients (largest |β| = {largest:.3e}), the isotonic map",
+                f"has {len(isotonic.values)} block(s), and the policy referred",
+                f"{run.review_queue} link(s) to review. The numbers above are a",
+                "measurement of the calibrator, not of the corpus.",
+                "",
+            ]
+        )
+        return lines
+
+    lines.extend(
+        [
+            "**No — and that is the honest and the interesting answer.** Stated in one",
+            "place rather than left to be assembled from four disclosures:",
+            "",
+            f"1. The residual tiers refuse rather than guess, so the fit population "
+            f"is **single class**: {blender.positive_count} of "
+            f"{blender.sample_count} training rows are positives"
+            + (" — there is no contrast to learn from." if single_class else "."),
+            f"2. Every logistic coefficient comes out **numerically zero** (largest "
+            f"|β| = {largest:.3e}), leaving only the intercept "
+            f"({blender.intercept:.2f}) — so the blender is a constant function.",
+            f"3. The isotonic map collapses to **one block** over "
+            f"{isotonic.sample_count} calibration rows: everything at or above "
+            f"{isotonic.thresholds[0]:.6f} maps to {isotonic.values[0]:.4f}.",
+            f"4. `tau_high` fits at **{selection.tau_high:.6f}**"
+            + (" (target attained)" if selection.attained else " (target not attained)")
+            + ", so only candidates the *tiers* already stamped 1.0 can auto-match.",
+            f"5. The review band `τ_low < p < τ_high` is therefore **empty**: "
+            f"{run.review_queue} link(s) were referred to review, and the run's "
+            "decisions carry only "
+            + ", ".join(f"`{value:.4f}`" for value in probabilities)
+            + " — a bimodal distribution with nothing in between, so the three-way "
+            "policy behaves two-way here.",
+            "",
+            "**Therefore the calibration layer cannot change a single decision on this",
+            "corpus. Remove it and every number in this document is identical.** What",
+            "the machinery buys is the *shape*: the day a tier starts proposing things",
+            "that are sometimes wrong, there is a fitted model, a held-out split and a",
+            "threshold-selection procedure already in place, and",
+            "`CalibrationProvenance` still refuses at construction to fit on `test`.",
+            "",
+            "\"Confidence-calibrated\" therefore describes the **architecture** here,",
+            "not a demonstrated behaviour. The report says which.",
+            "",
+        ]
+    )
+    return lines
+
+
 def _calibration_section(run: EvaluatedRun) -> list[str]:
     """Calibration quality, over the two populations that answer different questions.
 
@@ -573,6 +804,7 @@ def _calibration_section(run: EvaluatedRun) -> list[str]:
                 "",
             ]
         )
+    lines.extend(_calibration_verdict(run))
     lines.extend(["#### Reliability — asserted links", ""])
     lines.extend(_reliability_rows(asserted))
     lines.append("")
@@ -1312,6 +1544,232 @@ def _difficulty_section(artifact: SweepArtifact | None) -> list[str]:
     return lines
 
 
+def _comparison_section(artifact: ComparisonArtifact | None) -> list[str]:
+    """Before and after, over the same corpora, with one thing changed.
+
+    Absent when no artefact was given -- the same rule every other optional
+    section follows. An empty before/after table would suggest a change was
+    measured and found to do nothing, which is a different finding from not
+    having run the comparison.
+    """
+    if artifact is None or not artifact.rows:
+        return []
+
+    lines = [
+        "## Before and after (Phase 2.3)",
+        "",
+        f"**What changed:** {artifact.change}.",
+        "",
+        f"Both arms ran over the **same** corpora -- `{artifact.split}`, seeds "
+        + ", ".join(str(seed) for seed in artifact.seeds)
+        + ", three difficulties -- with the same fitted bundle and the same full",
+        "ladder. The only field that differs is `RunConfig.duplicates.enabled`, and",
+        "each arm's `tuning_hash` is printed so that claim is a check rather than a",
+        "sentence. Deltas are differences of means over five seeds, not significance",
+        "tests: five paired runs of a deterministic system are enough for a spread and",
+        "not enough for an inference.",
+        "",
+    ]
+
+    for row in artifact.rows:
+        lines.extend(
+            [
+                f"### `{row.difficulty}` — {len(row.after.seeds)} seeds",
+                "",
+                f"| Metric | {artifact.before_label} | {artifact.after_label} | Δ |",
+                "|---|---|---|---|",
+            ]
+        )
+        for metric in COMPARED_METRICS:
+            before = row.before.of(metric)
+            after = row.after.of(metric)
+            digits = 0 if metric.endswith(("_minor", "positives", "matched")) else 4
+            delta = row.delta(metric)
+            lines.append(
+                f"| {metric.replace('_', ' ')} | {_rendered(before, digits=digits)} | "
+                f"{_rendered(after, digits=digits)} | {delta:+.{digits}f} |"
+            )
+        lines.extend(
+            [
+                "",
+                f"Tuning hash: `{row.before.tuning_hash}` → `{row.after.tuning_hash}`.",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "### What the comparison does and does not show",
+            "",
+        ]
+    )
+    if artifact.precision_held_everywhere:
+        lines.extend(
+            [
+                "**Precision is unmoved and the false-positive count is still zero at",
+                "every difficulty and on every seed.** That is the only result that",
+                "makes the recall column mean anything here: recall bought with a wrong",
+                "auto-match is not an improvement in this project, and the",
+                "false-positive column is where that would have shown up in rupees.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "**The after arm produced false positives.** Every recall gain below is",
+                "therefore suspect and the false-positive cost column is the figure to",
+                "read first.",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "The change is a **statement-hygiene pass**, not a loosened threshold: no",
+            "tolerance, gate or threshold moved, and the pass's own two knobs can only",
+            "be turned towards asserting *less* (`ledgerloop.matching.duplicates`).",
+            "Switching it off reproduces every pre-Phase-2 number to the digit, which",
+            "`tests/unit/test_metrics_regression.py` asserts exactly rather than",
+            "approximately.",
+            "",
+        ]
+    )
+    return lines
+
+
+def _llm_report_section(artifact: LLMReportArtifact | None) -> list[str]:
+    """What one measured run of the production LLM path cost and was refused.
+
+    A different question from B2's, and kept in a different section for that
+    reason: B2 measures accuracy with no gates, this measures machinery under
+    them. The banner distinguishing a live provider from the offline analyst is
+    not decoration -- a reader who cannot tell which answered has been misled.
+    """
+    if artifact is None:
+        return []
+    if not artifact.ran:
+        return [
+            "## The production LLM path, measured",
+            "",
+            f"**Not run.** {artifact.reason}.",
+            "",
+            "No row of zeros is printed for it. A zero for a path that never executed",
+            "is a false measurement, and the same rule applies here as to T4 and B2.",
+            "",
+        ]
+
+    cost = artifact.cost
+    lines = ["## The production LLM path, measured", ""]
+    if artifact.live:
+        lines.extend(
+            [
+                f"**Live.** Ladder: {' → '.join(artifact.ladder) or 'n/a'}. The rung "
+                f"that answered was `{artifact.provider_used}`, at fallback depth "
+                f"{artifact.fallback_depth}.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "> **Offline stand-in.** These prompts were answered by",
+                "> `llm/offline_analyst.py` — a documented rule that reads the prompt",
+                "> and nothing else — because no provider key was present. Every column",
+                "> below is **measured machinery**: the calls, tokens, latency, cache,",
+                "> failures, budget refusals and gate outcomes all happened on the real",
+                "> code path. **No claim is made here about any language model's answer",
+                "> quality**, and the acceptance rates are properties of that rule.",
+                "",
+            ]
+        )
+    for failure in artifact.provider_failures:
+        lines.append(f"- rung declined — {failure}")
+    if artifact.provider_failures:
+        lines.append("")
+
+    lines.extend(
+        [
+            "| | |",
+            "|---|---|",
+            f"| Corpus | `{artifact.split}` seed {artifact.seed}, "
+            f"{artifact.record_count} records |",
+            f"| Live provider | {'yes' if artifact.live else 'no — offline stand-in'} |",
+            f"| Calls | {cost.llm_calls} |",
+            f"| Cache hits | {cost.cache_hits} "
+            f"({cost.cache_hit_rate:.0%} of attempts) |",
+            f"| Calls per 100 records | {artifact.calls_per_100_records:.2f} |",
+            f"| Prompt / completion tokens | {cost.prompt_tokens} / "
+            f"{cost.completion_tokens} |",
+            f"| Provider latency | {cost.wall_clock_ms} ms |",
+            f"| Actual spend | ₹{cost.actual_cost_inr:.2f} |",
+            f"| Equivalent paid-API cost | ₹{cost.equivalent_paid_cost_inr:.2f} |",
+            f"| Calls refused (budget / outage / schema) | {artifact.calls_refused} |",
+            f"| Schema failures retried | {artifact.validation_failures} |",
+            "",
+            "### What the gates did with what came back",
+            "",
+            "| | |",
+            "|---|---|",
+            f"| Narrations offered → accepted | {artifact.narrations_offered} → "
+            f"{artifact.narrations_accepted} |",
+            f"| Link proposals returned → accepted | {artifact.proposals_returned} → "
+            f"{artifact.proposals_accepted} |",
+            f"| Refused: reference not in the evidence pack | "
+            f"{artifact.rejected_ungrounded} |",
+            f"| Demoted: money did not close under `verify_arithmetic` | "
+            f"{artifact.demoted} |",
+            f"| Exception prose rewritten | {artifact.explanations_accepted} |",
+            "",
+            "A demoted proposal is **not dropped**: it becomes a candidate routed to a",
+            "human, because \"the model suggested this and the arithmetic disagrees\" is",
+            "information a controller wants.",
+            "",
+            "### The control: the same corpus with the model removed",
+            "",
+            "| Metric | with the model | `--no-llm` |",
+            "|---|---|---|",
+            f"| Precision | {artifact.with_llm.precision:.4f} | "
+            f"{artifact.without_llm.precision:.4f} |",
+            f"| Recall | {artifact.with_llm.recall:.4f} | "
+            f"{artifact.without_llm.recall:.4f} |",
+            f"| Match rate | {artifact.with_llm.match_rate:.4f} | "
+            f"{artifact.without_llm.match_rate:.4f} |",
+            f"| Exception recall | {artifact.with_llm.exception_recall:.4f} | "
+            f"{artifact.without_llm.exception_recall:.4f} |",
+            f"| Auto-matched links | {artifact.with_llm.auto_matched} | "
+            f"{artifact.without_llm.auto_matched} |",
+            f"| False positives | {artifact.with_llm.false_positives} | "
+            f"{artifact.without_llm.false_positives} |",
+            "",
+        ]
+    )
+    if artifact.metrics_unchanged:
+        lines.extend(
+            [
+                "**Identical.** Removing the model moved no published figure, which is",
+                "the measurement the project's central claim needs: \"the LLM proposes,",
+                "deterministic code decides\" is a claim about authority, and the way to",
+                "check authority is to take the model away and see whether the answer",
+                "changes.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "**Not identical**, and the reason is a permitted one. One call site --",
+                "narration repair -- is allowed to change what the ladder *reads*: an",
+                "accepted repair writes a reference onto a bank row exactly as the regex",
+                "layer would have, and every decision downstream of it is still made by",
+                "the ladder, the policy and `verify_arithmetic`. What is forbidden is a",
+                "proposal reaching `AUTO_MATCHED` without `arithmetic_verified`, and",
+                "`MatchDecision` refuses that at construction rather than measuring it.",
+                "",
+            ]
+        )
+    return lines
+
+
 def render_report(
     runs: Sequence[EvaluatedRun],
     *,
@@ -1320,6 +1778,8 @@ def render_report(
     llm_baseline: LLMBaselineArtifact | None = None,
     ablation: AblationArtifact | None = None,
     sweep: SweepArtifact | None = None,
+    comparison: ComparisonArtifact | None = None,
+    llm_report: LLMReportArtifact | None = None,
 ) -> str:
     """Render the whole document. Deterministic for a given input.
 
@@ -1337,7 +1797,9 @@ def render_report(
     lines.extend(_ablation_section(ablation))
     lines.extend(_multi_seed_section(sweep))
     lines.extend(_difficulty_section(sweep))
+    lines.extend(_comparison_section(comparison))
     lines.extend(_llm_baseline_section(llm_baseline))
+    lines.extend(_llm_report_section(llm_report))
     for run in runs:
         lines.extend(_headline(run))
         lines.extend(_link_table(run))

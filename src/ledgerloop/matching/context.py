@@ -39,6 +39,10 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from ledgerloop.ingest.dataset import IngestResult
+from ledgerloop.matching.duplicates import (
+    DuplicatePostings,
+    detect_duplicate_postings,
+)
 from ledgerloop.models.records import (
     CanonicalBankTxn,
     CanonicalOrder,
@@ -120,14 +124,32 @@ class MatchContext:
     consumed_settlements: set[str] = field(default_factory=set)
     consumed_credits: set[str] = field(default_factory=set)
 
+    #: Credits the duplicate-posting pass identified as re-postings of an
+    #: earlier identical credit. They are held out of the *matchable* pool and
+    #: out of nothing else: they are never consumed, so the exception classifier
+    #: still sees them as unclaimed and still raises them. See
+    #: :mod:`ledgerloop.matching.duplicates`.
+    duplicates: DuplicatePostings = field(default_factory=DuplicatePostings)
+
     @classmethod
-    def from_ingest(cls, ingest: IngestResult) -> MatchContext:
+    def from_ingest(
+        cls,
+        ingest: IngestResult,
+        *,
+        detect_duplicates: bool = True,
+        duplicate_window_days: int = 7,
+    ) -> MatchContext:
         """Build the indexes from an :class:`IngestResult`.
 
         Payments are grouped by the ``settlement_id`` the parser recorded rather
         than by the settlement's ``payment_ids`` list, so a payment quarantined
         at ingest simply does not appear -- and :attr:`SettlementView.
         gross_reconciles` then fails, which is the intended consequence.
+
+        ``detect_duplicates`` is the Phase 2.3 statement-hygiene pass, and it is
+        a parameter rather than an assumption so the evaluation can run both
+        arms over the same corpora and report the difference instead of claiming
+        it. ``False`` reproduces every pre-Phase-2 number exactly.
         """
         payments_by_settlement: dict[str, list[CanonicalPayment]] = {}
         for payment in ingest.payments:
@@ -152,10 +174,19 @@ class MatchContext:
             if view.utr is not None:
                 settlements_by_utr.setdefault(view.utr, []).append(view)
 
+        duplicates = (
+            detect_duplicate_postings(
+                ingest.bank_txns, window_days=duplicate_window_days
+            )
+            if detect_duplicates
+            else DuplicatePostings()
+        )
+
         return cls(
             orders=ingest.orders,
             settlements=views,
             bank_txns=ingest.bank_txns,
+            duplicates=duplicates,
             orders_by_id={order.order_id: order for order in ingest.orders},
             settlements_by_id={view.settlement_id: view for view in views},
             credits_by_utr={utr: tuple(rows) for utr, rows in credits_by_utr.items()},
@@ -171,11 +202,12 @@ class MatchContext:
                 yield view
 
     def open_credits_for(self, utr: str) -> tuple[CanonicalBankTxn, ...]:
-        """Unconsumed credits whose narration published ``utr``, in source order."""
+        """Unconsumed, non-reposted credits publishing ``utr``, in source order."""
         return tuple(
             txn
             for txn in self.credits_by_utr.get(utr, ())
             if txn.txn_id not in self.consumed_credits
+            and txn.txn_id not in self._reposted
         )
 
     def open_credits(self) -> tuple[CanonicalBankTxn, ...]:
@@ -189,7 +221,9 @@ class MatchContext:
         return tuple(
             txn
             for txn in self.bank_txns
-            if txn.is_credit and txn.txn_id not in self.consumed_credits
+            if txn.is_credit
+            and txn.txn_id not in self.consumed_credits
+            and txn.txn_id not in self._reposted
         )
 
     def open_settlements_for(self, utr: str) -> tuple[SettlementView, ...]:
@@ -199,6 +233,11 @@ class MatchContext:
             for view in self.settlements_by_utr.get(utr, ())
             if view.settlement_id not in self.consumed_settlements
         )
+
+    @property
+    def _reposted(self) -> frozenset[str]:
+        """Ids held out of the matchable pool by the duplicate-posting pass."""
+        return self.duplicates.reposted_ids
 
     def consume(self, settlement_id: str, credit_ids: Sequence[str] = ()) -> None:
         """Remove a settlement, and any credits it claimed, from the pool.

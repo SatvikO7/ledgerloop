@@ -114,12 +114,18 @@ class TestWhatBecomesAPrediction:
         assert len(clean_run.predictions) == 2
 
     def test_a_referral_never_becomes_a_prediction(self):
-        """A contested settlement asserts nothing to the evaluator."""
+        """A contested settlement asserts nothing to the evaluator.
+
+        Both credits land on the **same day**, which is what keeps the contest a
+        contest: the Phase 2.3 duplicate-posting pass needs a unique earliest
+        row to call one of them a re-posting, and two same-day postings give it
+        no ordering. So this exercises the tier's refusal rather than the pass's.
+        """
         only = batch()
         run = run_matching(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             ),
             config(),
             decided_at=WHEN,
@@ -171,11 +177,13 @@ class TestCandidateYieldVersusConviction:
         assert rows[Tier.T2_AGGREGATION].auto_matched == 0
 
     def test_yield_exceeds_auto_matches_when_the_policy_declines(self):
+        # Same-day rivals: an unorderable pair the duplicate-posting pass leaves
+        # to the tier, so the contested path is the one under test.
         only = batch()
         run = run_matching(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             ),
             config(),
             decided_at=WHEN,
@@ -281,7 +289,7 @@ class TestDiagnostics:
                 bank_txns=[
                     resolved.credit("BNK-00001"),
                     contested.credit("BNK-00002"),
-                    contested.credit("BNK-00003", days_after=2),
+                    contested.credit("BNK-00003"),
                 ],
             ),
             config(),
@@ -376,17 +384,19 @@ class TestAgainstAGeneratedSplit:
     def test_recall_is_reported_honestly_and_is_still_short_of_the_target(
         self, split_scored
     ):
-        """Five tiers reach well under half the links, and that is recorded.
+        """Five tiers reach most of the links, and the rest is recorded as missed.
 
-        What remains is the contested duplicates (A05) and the batches whose
-        spellings the lexical gate will not relate -- both refusals rather than
-        failures to look. A step that quietly optimised recall would have to
-        give up precision to do it, and the precision column says it did not.
+        Phase 2.3 moved this from 0.4422 to 0.8435 by de-duplicating the
+        statement before the ladder ran; what remains is the split payouts T2
+        cannot partition uniquely and one genuinely ambiguous subset -- refusals
+        rather than failures to look. A step that quietly optimised recall would
+        have to give up precision to do it, and the precision column says it did
+        not: still exactly 1.0, still zero false positives.
         """
         _, _, metrics = split_scored
         links = metrics.link_metrics
         assert links is not None
-        assert 0.40 < links.recall < 0.60
+        assert 0.80 < links.recall < 0.90
         assert links.precision == 1.0
 
 

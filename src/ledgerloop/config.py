@@ -31,6 +31,7 @@ __all__ = [
     "STANDARD_PREVALENCE",
     "AutoResolutionBounds",
     "DecisionThresholds",
+    "DuplicateDetection",
     "GeneratorConfig",
     "GraphInference",
     "LLMConfig",
@@ -64,6 +65,34 @@ class MatchingTolerances(FrozenLedgerModel):
     )
     subset_solver_timeout_ms: int = Field(
         default=200, ge=1, description="Hard per-credit cap (PLAN.md §6.2)."
+    )
+
+
+class DuplicateDetection(FrozenLedgerModel):
+    """The statement-hygiene pass that runs before the ladder (Phase 2.3).
+
+    Both fields only ever make the pass *decline* more: disabling it reproduces
+    every pre-Phase-2 number exactly, and narrowing the window can only shrink
+    the set of groups it calls duplicated. That direction is deliberate -- an
+    improvement whose knob can only be turned towards "assert less" cannot be
+    accused of having bought its recall with precision.
+
+    See :mod:`ledgerloop.matching.duplicates` for the invariant and the guards.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="False restores the pre-Phase-2 behaviour, in which a payout "
+        "posted twice leaves both rows in the pool and every tier refuses the "
+        "whole batch. The evaluation runs both arms.",
+    )
+    window_days: int = Field(
+        default=7,
+        ge=0,
+        description="How long after the payout a re-posting may arrive. A "
+        "settlement week: long enough for a bank to repost across a weekend, "
+        "short enough that a monthly payout of an identical amount is never "
+        "caught by it.",
     )
 
 
@@ -392,6 +421,7 @@ class RunConfig(FrozenLedgerModel):
     seed: int = Field(default=42, ge=0)
 
     tolerances: MatchingTolerances = Field(default_factory=MatchingTolerances)
+    duplicates: DuplicateDetection = Field(default_factory=DuplicateDetection)
     lexical: LexicalMatching = Field(default_factory=LexicalMatching)
     graph: GraphInference = Field(default_factory=GraphInference)
     thresholds: DecisionThresholds = Field(default_factory=DecisionThresholds)

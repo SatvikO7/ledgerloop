@@ -41,12 +41,14 @@ from datetime import date
 
 from ledgerloop.config import RunConfig
 from ledgerloop.exceptions.taxonomy import (
+    ClawbackItem,
     CreditItem,
     PaymentItem,
     SettlementItem,
     classify_credit,
     classify_payment,
     classify_settlement,
+    clawback_items,
     residual_items,
     severity_for,
 )
@@ -99,6 +101,8 @@ class ExceptionOutcome:
     settlements_seen: int = 0
     credits_seen: int = 0
     payments_seen: int = 0
+    clawbacks_seen: int = 0
+    """Claw-backs traced to a refund from an earlier batch (Phase 2.3)."""
     ambiguities: int = 0
     debits_ignored: int = 0
     """Outgoing rows the queue does not cover.
@@ -347,6 +351,22 @@ def _credit_evidence(item: CreditItem) -> tuple[Evidence, ...]:
             refs=(bank_ref(credit.txn_id),),
         ),
     ]
+    original = item.reposting_of
+    if original is not None:
+        chain.append(
+            Evidence(
+                kind=EvidenceKind.EXACT_KEY,
+                detail=(
+                    f"{original.txn_id} credits the same "
+                    f"{format_minor(original.credit_minor)} under the same narration "
+                    f"on {original.value_date.isoformat()}, "
+                    f"{(credit.value_date - original.value_date).days} day(s) earlier "
+                    f"-- so {credit.txn_id} is a re-posting of it, not a second payout"
+                ),
+                refs=(bank_ref(original.txn_id),),
+                amount_minor=original.credit_minor,
+            )
+        )
     for other in item.twin_credits:
         chain.append(
             Evidence(
@@ -611,17 +631,23 @@ def classify_exceptions(
     for credit in credit_items:
         exception_class = classify_credit(credit)
         involved = [bank_ref(credit.key)]
+        if credit.reposting_of is not None:
+            involved.append(bank_ref(credit.reposting_of.txn_id))
         involved.extend(bank_ref(other.txn_id) for other in credit.twin_credits)
         involved.extend(
             settlement_ref(view.settlement_id) for view in credit.keyed_settlements
         )
         counterpart = (
-            credit.twin_credits[0].txn_id
-            if credit.twin_credits
+            credit.reposting_of.txn_id
+            if credit.reposting_of is not None
             else (
-                credit.keyed_settlements[0].settlement_id
-                if credit.keyed_settlements
-                else None
+                credit.twin_credits[0].txn_id
+                if credit.twin_credits
+                else (
+                    credit.keyed_settlements[0].settlement_id
+                    if credit.keyed_settlements
+                    else None
+                )
             )
         )
         # Which of two twins is the duplicate is only established when the
@@ -631,6 +657,7 @@ def classify_exceptions(
         detail = ""
         if (
             exception_class is ExceptionClass.DUPLICATE_CREDIT
+            and credit.reposting_of is None
             and not credit.matched_twins
         ):
             detail = (
@@ -654,9 +681,22 @@ def classify_exceptions(
                 ),
                 detail=detail,
                 counterpart=counterpart,
-                day_gap=None,
+                # Present only for a re-posting the duplicate pass identified,
+                # where the ordering IS the evidence and there may be no shared
+                # reference to cite. `prose_for` branches on exactly that.
+                day_gap=(
+                    (credit.credit.value_date - credit.reposting_of.value_date).days
+                    if credit.reposting_of is not None
+                    else None
+                ),
             )
         )
+
+    clawbacks = clawback_items(
+        context, matched_settlements=frozenset(index.matched_settlements)
+    )
+    for clawback_item in clawbacks:
+        raised.append(_clawback_exception(clawback_item, config, latest=latest))
 
     for payment_item in payment_items:
         exception_class = classify_payment(payment_item)
@@ -688,6 +728,7 @@ def classify_exceptions(
         settlements_seen=len(settlement_items),
         credits_seen=len(credit_items),
         payments_seen=len(payment_items),
+        clawbacks_seen=len(clawbacks),
         ambiguities=ambiguities,
         debits_ignored=sum(1 for txn in context.bank_txns if not txn.is_credit),
     )
@@ -703,3 +744,96 @@ def queue_order(exceptions: Sequence[ReconException]) -> tuple[ReconException, .
 #: The prose version every exception in a queue was written against.
 PROSE = PROSE_VERSION
 __all__ += ["PROSE"]
+
+
+def _clawback_exception(
+    item: ClawbackItem, config: RunConfig, *, latest: date
+) -> ReconException:
+    """The queue row for a refund taken out of somebody else's batch.
+
+    The class is ``POST_SETTLEMENT_REFUND`` in both the attributed and the
+    ambiguous case -- what the system concluded is the same thing either way,
+    and only the *subject* differs. Softening the ambiguous one to
+    ``UNKNOWN_RESIDUAL`` would throw away the part that is known.
+    """
+    attributed = item.attributed
+    subject = (
+        order_ref(attributed.order_id)
+        if attributed is not None
+        else settlement_ref(item.view.settlement_id)
+    )
+    involved: list[RecordRef] = [
+        settlement_ref(item.view.settlement_id),
+        *(order_ref(order.order_id) for order in item.refunded_orders),
+        *(settlement_ref(view.settlement_id) for view in item.source_settlements),
+    ]
+    if attributed is not None:
+        involved.insert(0, subject)
+
+    origin = item.source_settlements[0] if item.source_settlements else None
+    detail = (
+        f"{len(item.refunded_orders)} refunded orders carry this amount, so the "
+        "adjustment does not name one of them."
+        if attributed is None
+        else ""
+    )
+    return _build(
+        subject=subject,
+        exception_class=ExceptionClass.POST_SETTLEMENT_REFUND,
+        impact_minor=item.impact_minor,
+        involved=involved,
+        evidence=_clawback_evidence(item),
+        severity=severity_for(
+            item.impact_minor,
+            age_days=_age_days(item.as_of, latest),
+            thresholds=config.severity,
+        ),
+        detail=detail,
+        counterpart=origin.settlement_id if origin is not None else item.view.settlement_id,
+        day_gap=None,
+    )
+
+
+def _clawback_evidence(item: ClawbackItem) -> tuple[Evidence, ...]:
+    """The two source facts, each pointing at the document that states it."""
+    settlement = settlement_ref(item.view.settlement_id)
+    evidence = [
+        Evidence(
+            kind=EvidenceKind.ARITHMETIC_CHECK,
+            detail=(
+                f"{item.view.settlement_id} declares adjustments of "
+                f"{format_minor(-item.amount_minor)}, which matches none of its "
+                f"{len(item.view.payments)} nested payment(s) -- so the money it "
+                "accounts for was not paid out in this batch"
+            ),
+            refs=(settlement,),
+            amount_minor=item.amount_minor,
+        )
+    ]
+    for order in item.refunded_orders:
+        origin = next(
+            (
+                view
+                for view in item.source_settlements
+                if any(
+                    payment.order_ref_normalized == order.order_id
+                    for payment in view.payments
+                )
+            ),
+            None,
+        )
+        where = (
+            f" and was paid out in {origin.settlement_id}" if origin is not None else ""
+        )
+        evidence.append(
+            Evidence(
+                kind=EvidenceKind.EXACT_KEY,
+                detail=(
+                    f"the ledger marks {order.order_id} REFUNDED for "
+                    f"{format_minor(order.amount_minor)}{where}"
+                ),
+                refs=(order_ref(order.order_id), settlement),
+                amount_minor=order.amount_minor,
+            )
+        )
+    return tuple(evidence)

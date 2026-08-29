@@ -98,11 +98,22 @@ def prose_for(
         )
 
     if exception_class is ExceptionClass.DUPLICATE_CREDIT:
+        # Two ways to establish a duplicate, and they cite different evidence.
+        # The keyed case has a shared reference to point at; the composed
+        # A05+A07 case has none -- the narration lost it -- and the finding rests
+        # on the amount, the narration and the ordering instead. Saying "under a
+        # reference" about a row that carries no reference would send a
+        # controller looking for something that is not there.
         return Prose(
             root_cause=(
                 f"{subject} credits {amount} under a reference that also appears on "
                 f"{counterpart or 'another credit'}. The same payout is in the "
                 f"statement twice.{tail}"
+                if day_gap is None
+                else f"{subject} credits {amount} — the same amount under the same "
+                f"narration as {counterpart or 'an earlier credit'}, "
+                f"{day_gap} day(s) later. The same payout is in the statement "
+                f"twice.{tail}"
             ),
             suggested_action=(
                 f"Flag {subject} as a duplicate of {counterpart or 'the earlier credit'} "

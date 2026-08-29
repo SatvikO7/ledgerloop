@@ -144,12 +144,23 @@ class TestAmountIsPartOfTheKey:
 
 
 class TestContestedKeys:
-    """A05 DUPLICATE_CREDIT, and the rule that an exact key is not enough."""
+    """A05 DUPLICATE_CREDIT, and the rule that an exact key is not enough.
 
-    def test_two_identical_credits_are_contested_not_matched(self):
+    Every corpus in this class puts its rival credits on the **same day**. That
+    is deliberate and it is what keeps these tests about T0. The Phase 2.3
+    duplicate-posting pass (:mod:`ledgerloop.matching.duplicates`) resolves a
+    payout posted twice on *different* days -- the earliest is the payout, the
+    rest are re-postings -- but it needs a unique earliest to say so, and two
+    postings on one day give it no ordering. So it declines, the pair reaches
+    T0 exactly as it did before Phase 2, and the refusal below is the tier's.
+
+    ``tests/unit/test_matching_duplicates.py`` covers the orderable case.
+    """
+
+    def test_two_credits_the_statement_cannot_order_are_contested(self):
         only = batch()
         first = only.credit("BNK-00001")
-        duplicate = only.credit("BNK-00002", days_after=2)
+        duplicate = only.credit("BNK-00002")
         outcome = _t0(corpus(batches=[only], bank_txns=[first, duplicate]))
 
         assert outcome.resolved_settlements == 0
@@ -162,7 +173,7 @@ class TestContestedKeys:
         outcome = _t0(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             )
         )
         assert outcome.payment_links == 0
@@ -172,7 +183,7 @@ class TestContestedKeys:
         outcome = _t0(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             )
         )
         assert [c.calibrated_p for c in outcome.candidates] == [0.5, 0.5]
@@ -182,7 +193,7 @@ class TestContestedKeys:
         outcome = _t0(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             )
         )
         negatives = [
@@ -201,7 +212,7 @@ class TestContestedKeys:
         context = MatchContext.from_ingest(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             )
         )
         resolve_bank_leg(context, T0_RULE)
@@ -215,8 +226,8 @@ class TestContestedKeys:
                 batches=[only],
                 bank_txns=[
                     only.credit("BNK-00001"),
-                    only.credit("BNK-00002", days_after=2),
-                    only.credit("BNK-00003", days_after=3),
+                    only.credit("BNK-00002"),
+                    only.credit("BNK-00003"),
                 ],
             )
         )

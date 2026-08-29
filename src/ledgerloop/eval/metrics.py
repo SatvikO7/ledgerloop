@@ -57,7 +57,12 @@ from ledgerloop.models.enums import (
     LinkType,
     RecordType,
 )
-from ledgerloop.models.metrics import LinkMetrics, RunMetrics, TierContribution
+from ledgerloop.models.metrics import (
+    LinkMetrics,
+    Proportion,
+    RunMetrics,
+    TierContribution,
+)
 from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.models.refs import RecordRef
 from ledgerloop.models.truth import GroundTruth, TruthPair
@@ -73,6 +78,7 @@ __all__ = [
     "MatchRateResult",
     "MoneyView",
     "PredictedLink",
+    "Proportion",
     "confusion",
     "covered_refs",
     "evaluate",
@@ -238,6 +244,7 @@ def link_metrics(
     false_positives = len(matrix.false_positives)
 
     ci_low, ci_high = wilson_interval(true_positives, matrix.predicted_count)
+    recall_low, recall_high = wilson_interval(true_positives, matrix.truth_count)
 
     cost = 0
     if asserted_amount_by_pair is not None:
@@ -255,6 +262,8 @@ def link_metrics(
         f1=matrix.f1,
         precision_ci_low=ci_low,
         precision_ci_high=ci_high,
+        recall_ci_low=recall_low,
+        recall_ci_high=recall_high,
         false_positive_cost_minor=cost,
     )
 
@@ -548,6 +557,12 @@ def evaluate(
     money = money_view(pairs, truth)
     record_count = len(truth.records)
 
+    # Phase 2.1: every headline proportion travels with its sample size and its
+    # 95% Wilson interval, not precision alone. See models/metrics.py's module
+    # docstring for why the omission mattered most on the smallest denominator.
+    predicted_count = links.true_positives + links.false_positives
+    truth_count = links.true_positives + links.false_negatives
+
     seconds = wall_clock_ms / 1000.0
     return RunMetrics(
         run_id=run_id,
@@ -555,6 +570,17 @@ def evaluate(
         auto_match_precision=links.precision,
         match_rate=coverage.rate,
         exception_recall=queue.recall,
+        precision_interval=Proportion.of(links.true_positives, predicted_count),
+        recall_interval=Proportion.of(links.true_positives, truth_count),
+        match_rate_interval=Proportion.of(
+            len(coverage.resolved_refs), len(coverage.denominator_refs)
+        ),
+        exception_recall_interval=Proportion.of(
+            len(queue.covered_expected), len(queue.expected)
+        ),
+        unmatchable_coverage_interval=Proportion.of(
+            len(queue.covered_unmatchable), len(queue.unmatchable)
+        ),
         exceptions_by_class=exceptions_by_class(exceptions),
         exception_confusion=exception_confusion(exceptions, truth),
         link_metrics=links,

@@ -567,7 +567,11 @@ def harvest(
     if top_k < 1:
         raise ValueError(f"top_k must be at least 1, got {top_k}")
 
-    context = MatchContext.from_ingest(ingest)
+    context = MatchContext.from_ingest(
+        ingest,
+        detect_duplicates=config.duplicates.enabled,
+        duplicate_window_days=config.duplicates.window_days,
+    )
     order_leg, t0_bank = run_tier0(context)
     t1_bank = run_tier1(context, config.tolerances)
 

@@ -15,19 +15,38 @@ WHY THE `test` SPLIT AT SEED 42
 -------------------------------
 Because that is the corpus every published number in the project was measured
 on. Pinning a different one would protect a result nobody quoted.
+
+PHASE 2 KEPT EVERY PIN, AND ADDED A SECOND SET
+-----------------------------------------------
+Phase 2.3 changed one thing about the run: a duplicate-posting pass now runs
+over the statement before the ladder does. The historical numbers below are
+therefore pinned on ``duplicates=DuplicateDetection(enabled=False)``, and they
+**still hold exactly** -- 130/0/164, recall 0.4422, match rate 0.4261, and every
+ladder prefix and per-class figure to six places. That is the strongest
+statement available about the change: it is additive, it is switchable, and
+turning it off reproduces Steps 4-9 to the digit rather than approximately.
+
+:class:`TestPhase2Defaults` pins what the shipped configuration measures now.
+Both sets are exact. One exception recall moved in *both* arms, and its own test
+says why.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from ledgerloop.config import GeneratorConfig
+from ledgerloop.config import DuplicateDetection, GeneratorConfig
 from ledgerloop.eval.baselines import run_b0
 from ledgerloop.eval.harness import run_system
 from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.truth_io import load_ground_truth
 from ledgerloop.generator import generate_to_disk
 from ledgerloop.models.enums import AnomalyClass, SplitName
+
+#: The pre-Phase-2 pass switch. Every historical pin is measured with the
+#: duplicate-posting pass off, which is what makes "Phase 2.3 changed nothing
+#: else" a check rather than a claim.
+PRE_PHASE_2 = DuplicateDetection(enabled=False)
 
 #: The ladder as it stands: T0-T4 uncalibrated, on `test` seed 42, generator
 #: 0.2.0. Uncalibrated because the fitted bundle is an artefact this test would
@@ -58,6 +77,15 @@ def corpus(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def system(corpus):
+    """The ladder as Steps 4-9 ran it: Phase 2.3's pass switched off."""
+    return run_system(
+        corpus, duplicates=PRE_PHASE_2, measure_calibration_quality=False
+    )
+
+
+@pytest.fixture(scope="module")
+def shipped(corpus):
+    """The ladder as it ships after Phase 2, with every default in force."""
     return run_system(corpus, measure_calibration_quality=False)
 
 
@@ -85,9 +113,26 @@ class TestTheLadderStillMeasuresWhatItMeasured:
     def test_match_rate_is_still_0_4261(self, system):
         assert system.metrics.match_rate == pytest.approx(0.4261, abs=5e-5)
 
-    def test_exception_recall_is_still_0_9333(self, system):
-        """Step 8's headline, after the third item kind took it from 0.4667."""
-        assert system.metrics.exception_recall == pytest.approx(0.9333, abs=5e-5)
+    def test_exception_recall_moved_from_0_9333_to_1_0000(self, system, shipped):
+        """The one pin Phase 2 moved, and it moved in **both** arms.
+
+        Step 8 reported 0.9333 -- 28 of 30 -- and the two it missed were orders
+        refunded after their own payout had already left, whose claw-back was
+        netted off a *later* batch (A06). Nothing in the queue reached them:
+        the later batch reconciles to the paise, the earlier one was paid in
+        full, and the order appears in no unresolved link. They used to be
+        covered only by accident, when some unrelated anomaly happened to leave
+        their batch contested and its evidence chain named them.
+
+        Phase 2.3 added :func:`~ledgerloop.exceptions.taxonomy.clawback_items`,
+        which attributes such an adjustment to the refunded order the ledger
+        itself marks REFUNDED. It is independent of the duplicate-posting pass
+        -- which is why both arms read 1.0000 here -- and it is why 30 of 30 is
+        now covered.
+        """
+        assert system.metrics.exception_recall == 1.0
+        assert shipped.metrics.exception_recall == 1.0
+        assert len(system.coverage.expected) == 30
 
     def test_the_unmatchable_floor_is_reported_and_excluded(self, system):
         """35 records the sources cannot reconcile, covered by the queue in full
@@ -115,7 +160,10 @@ class TestThePerTierResultsAreUnmoved:
         self, corpus, tiers, recall, label
     ):
         run = run_system(
-            corpus, enabled_tiers=tiers, measure_calibration_quality=False
+            corpus,
+            enabled_tiers=tiers,
+            duplicates=PRE_PHASE_2,
+            measure_calibration_quality=False,
         )
         links = run.metrics.link_metrics
         assert links is not None, label
@@ -208,3 +256,99 @@ class TestTheCorpusItselfIsUnmoved:
         assert truth.generator_version == "0.2.0"
         assert len(truth.evaluation_pairs) == 294
         assert len(truth.records) == 742
+
+
+class TestPhase2Defaults:
+    """What the shipped configuration measures, pinned as exactly as the rest.
+
+    Every number here is on the same corpus as the historical pins above, so the
+    two classes read as one before-and-after table. Precision and the false
+    positive cost are the ones that must not move, and they do not.
+    """
+
+    def test_the_link_counts_after_the_duplicate_posting_pass(self, shipped):
+        links = shipped.metrics.link_metrics
+        assert links is not None
+        actual = {
+            "true_positives": links.true_positives,
+            "false_positives": links.false_positives,
+            "false_negatives": links.false_negatives,
+            "false_positive_cost_minor": links.false_positive_cost_minor,
+        }
+        assert actual == {
+            "true_positives": 248,
+            "false_positives": 0,
+            "false_negatives": 46,
+            "false_positive_cost_minor": 0,
+        }
+
+    def test_precision_is_still_exactly_one(self, shipped):
+        """The whole point. 118 more links asserted and still nothing wrong."""
+        assert shipped.metrics.auto_match_precision == 1.0
+
+    def test_recall_is_0_8435(self, shipped):
+        links = shipped.metrics.link_metrics
+        assert links is not None
+        assert links.recall == pytest.approx(0.8435, abs=5e-5)
+
+    def test_match_rate_is_0_7971(self, shipped):
+        assert shipped.metrics.match_rate == pytest.approx(0.7971, abs=5e-5)
+
+    @pytest.mark.parametrize(
+        ("tiers", "recall"),
+        [
+            ((0, 1), 0.496599),
+            ((0, 1, 2), 0.625850),
+            ((0, 1, 2, 3), 0.843537),
+            ((0, 1, 2, 3, 4), 0.843537),
+        ],
+    )
+    def test_every_ladder_prefix_gains_and_none_loses_precision(
+        self, corpus, tiers, recall
+    ):
+        """The pass lifts every rung, T4 still contributes nothing, and no rung
+        buys its recall with a false positive."""
+        run = run_system(corpus, enabled_tiers=tiers, measure_calibration_quality=False)
+        links = run.metrics.link_metrics
+        assert links is not None
+        assert links.recall == pytest.approx(recall, abs=5e-6)
+        assert links.false_positives == 0
+
+    @pytest.mark.parametrize(
+        ("anomaly", "recall"),
+        [
+            (AnomalyClass.CLEAN, 0.975309),
+            (AnomalyClass.ROUNDING_DRIFT, 1.0),
+            (AnomalyClass.TIMING_SHIFT, 1.0),
+            (AnomalyClass.MISSING_REFERENCE, 0.752941),
+            (AnomalyClass.SPLIT_PAYOUT, 0.342857),
+        ],
+    )
+    def test_per_class_recall_including_the_row_that_did_not_move(
+        self, shipped, anomaly, recall
+    ):
+        """A09 SPLIT_PAYOUT is pinned at exactly its old 0.342857, and that is
+        the honest headline of Phase 2.3: the pass fixed the duplicate-posting
+        loss and did nothing at all for split payouts, which are the whole of
+        the 46 links still missing. Reported as unmoved rather than averaged
+        away.
+        """
+        assert shipped.metrics.recall_by_anomaly_class[anomaly] == pytest.approx(
+            recall, abs=5e-6
+        )
+
+    def test_the_duplicate_postings_it_found_are_still_in_the_queue(self, shipped):
+        """Ten groups on this corpus, and every re-posting is a bank row the
+        queue still reports -- the pass moves money out of the *matchable* pool
+        and never out of the report.
+        """
+        duplicates = shipped.matched.context.duplicates
+        assert len(duplicates.groups) == 10
+        covered = {
+            ref.key
+            for exception in shipped.exceptions
+            for ref in exception.involved_refs
+        }
+        assert all(
+            f"bank_txn:{txn_id}" in covered for txn_id in duplicates.reposted_ids
+        )

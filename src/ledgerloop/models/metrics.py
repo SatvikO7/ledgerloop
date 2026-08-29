@@ -12,6 +12,21 @@ decision moves precision from 1.000 to 0.996 and two moves it to 0.992. A
 headline "0.99 precision" from that sample cannot be distinguished from 0.97.
 Reporting the interval alongside the point estimate is the difference between
 a measured claim and a lucky one.
+
+**Phase 2.1 applies that rule to every headline proportion, not to precision
+alone.** Until then the argument was made at length and then honoured once,
+which is the sharpest methodological criticism the project's own standard
+invites. The metric with the smallest denominator in the whole report is
+exception recall -- thirty records on ``test`` seed 42 -- and it was the one
+printed to four significant figures with no interval at all. Its 95% Wilson
+interval spans roughly twenty points, and the target sits inside it, so the
+interval changes what the number *means*: at n = 30 the run neither meets nor
+conclusively misses ≥ 0.95, and a bare point estimate cannot say that.
+
+Every interval here is **Wilson at 95%**, computed by
+:func:`~ledgerloop.stats.wilson_interval`, and every one travels with the
+integer numerator and denominator it was computed from -- so a reader can
+re-derive it, and a proportion can never be reported without its sample size.
 """
 
 from __future__ import annotations
@@ -25,9 +40,66 @@ __all__ = [
     "CalibrationMetrics",
     "CostLedger",
     "LinkMetrics",
+    "Proportion",
     "RunMetrics",
     "TierContribution",
 ]
+
+
+class Proportion(FrozenLedgerModel):
+    """A ratio that cannot be reported without its sample size or its interval.
+
+    The type exists so the omission is not available. A bare ``float`` field can
+    be printed alone; this one carries ``successes``, ``trials`` and a 95%
+    Wilson interval in the same object, so any renderer that shows the estimate
+    has the other three to hand and no excuse for dropping them.
+    """
+
+    successes: int = Field(ge=0)
+    trials: int = Field(ge=0)
+    value: float = Field(ge=0.0, le=1.0)
+    ci_low: float = Field(ge=0.0, le=1.0)
+    ci_high: float = Field(ge=0.0, le=1.0)
+
+    @classmethod
+    def of(cls, successes: int, trials: int) -> Proportion:
+        """Build one from its counts. The only sanctioned constructor.
+
+        A zero denominator yields ``0.0`` with the full ``[0, 1]`` interval:
+        a system that predicted nothing has not achieved perfect precision, and
+        with no evidence every proportion remains possible.
+        """
+        from ledgerloop.stats import wilson_interval
+
+        low, high = wilson_interval(successes, trials)
+        return cls(
+            successes=successes,
+            trials=trials,
+            value=successes / trials if trials > 0 else 0.0,
+            ci_low=low,
+            ci_high=high,
+        )
+
+    @property
+    def width(self) -> float:
+        return self.ci_high - self.ci_low
+
+    def covers(self, target: float) -> bool:
+        """Whether ``target`` lies inside the interval.
+
+        The question a target-versus-result line has to answer honestly. At
+        n = 30 an estimate of 0.9333 against a target of 0.95 is not a miss --
+        it is a sample that cannot separate the two, and this says so.
+        """
+        return self.ci_low <= target <= self.ci_high
+
+    def render(self, places: int = 4) -> str:
+        """``0.9333 [0.7868, 0.9815] (n=30)`` -- estimate, interval, sample."""
+        return (
+            f"{self.value:.{places}f} "
+            f"[{self.ci_low:.{places}f}, {self.ci_high:.{places}f}] "
+            f"(n={self.trials})"
+        )
 
 
 class LinkMetrics(FrozenLedgerModel):
@@ -43,6 +115,16 @@ class LinkMetrics(FrozenLedgerModel):
 
     precision_ci_low: float = Field(ge=0.0, le=1.0)
     precision_ci_high: float = Field(ge=0.0, le=1.0)
+
+    recall_ci_low: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Wilson lower bound on recall. Added in Phase 2.1: recall "
+        "has a smaller denominator than precision on every corpus here, so it "
+        "needed the interval more and had it less.",
+    )
+    recall_ci_high: float = Field(default=1.0, ge=0.0, le=1.0)
 
     false_positive_cost_minor: MinorUnits = Field(
         default=0,
@@ -148,6 +230,32 @@ class RunMetrics(LedgerModel):
         description="auto-matched / reconcilable. Denominator excludes UNMATCHABLE.",
     )
     exception_recall: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    # --- the same three, with their sample sizes and intervals (Phase 2.1) ---
+    #
+    # The bare floats above are kept because every existing caller reads them and
+    # a rename would touch the UI, the artefacts and the ablation for no gain.
+    # What is added is the honest form of each, and the report renders these.
+    precision_interval: Proportion | None = Field(
+        default=None, description="Auto-match precision with n and its 95% Wilson CI."
+    )
+    recall_interval: Proportion | None = Field(
+        default=None, description="Link recall with n and its 95% Wilson CI."
+    )
+    match_rate_interval: Proportion | None = Field(
+        default=None, description="Match rate with n and its 95% Wilson CI."
+    )
+    exception_recall_interval: Proportion | None = Field(
+        default=None,
+        description="Exception recall with n and its 95% Wilson CI. The smallest "
+        "denominator in the report, and the reason Phase 2.1 exists.",
+    )
+    unmatchable_coverage_interval: Proportion | None = Field(
+        default=None,
+        description="Share of the UNMATCHABLE floor the queue accounted for, "
+        "with n and its interval. Reported on its own line and never inside "
+        "exception recall.",
+    )
 
     link_metrics: LinkMetrics | None = None
     calibration: CalibrationMetrics | None = None

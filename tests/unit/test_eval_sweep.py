@@ -33,10 +33,21 @@ def three_seeds(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def three_difficulties(tmp_path_factory):
+    """Three difficulties over five seeds each -- fifteen 60-order corpora.
+
+    Five seeds rather than one because the response curve this fixture exists to
+    check is a claim about the *dial*, and one 60-order corpus does not measure
+    the dial. It has three or four settlements, so a single unresolvable split
+    payout moves its recall by twenty points and the easy column can land below
+    the hard one on noise alone. The published sweep runs five seeds at 300
+    orders for exactly this reason (PLAN.md 9.4); this is the same discipline at
+    a size a unit test can afford.
+    """
     root = tmp_path_factory.mktemp("sweep-difficulty")
     return [
-        _corpus(root, difficulty, 42)
+        _corpus(root, difficulty, seed)
         for difficulty in (Difficulty.EASY, Difficulty.STANDARD, Difficulty.HARD)
+        for seed in (42, 43, 44, 45, 46)
     ]
 
 
@@ -107,7 +118,7 @@ class TestDifficulty:
 
     def test_the_dial_reads_left_to_right_as_more_goes_wrong(self, three_difficulties):
         """Difficulty order, not dictionary order, so the response curve is
-        readable as a curve."""
+        readable as a curve -- and, over five seeds, monotone."""
         artifact = run_sweep(three_difficulties)
         recalls = [group.of("recall").mean for group in artifact.groups]
         assert recalls == sorted(recalls, reverse=True)

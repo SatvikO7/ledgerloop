@@ -190,7 +190,9 @@ class TestT1CannotOverrideT0:
         _, first, second = _ladder(
             corpus(
                 batches=[only],
-                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002", days_after=2)],
+                # Same day: unorderable, so the duplicate-posting pass declines
+                # and T0's contest -- the thing under test -- is what happens.
+                bank_txns=[only.credit("BNK-00001"), only.credit("BNK-00002")],
             )
         )
         assert first.contested_settlements == 1
@@ -248,7 +250,7 @@ class TestWhatT1DeclinesOnPurpose:
                 batches=[only],
                 bank_txns=[
                     only.credit("BNK-00001", delta_minor=1),
-                    only.credit("BNK-00002", delta_minor=1, days_after=2),
+                    only.credit("BNK-00002", delta_minor=1),
                 ],
             )
         )

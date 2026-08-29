@@ -500,7 +500,11 @@ def open_ladder(
     """
     started_ns = time.perf_counter_ns()
     enabled = frozenset(config.enabled_tiers)
-    context = MatchContext.from_ingest(ingest)
+    context = MatchContext.from_ingest(
+        ingest,
+        detect_duplicates=config.duplicates.enabled,
+        duplicate_window_days=config.duplicates.window_days,
+    )
 
     t0_started = time.perf_counter_ns()
     if 0 in enabled:

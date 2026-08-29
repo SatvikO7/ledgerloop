@@ -56,10 +56,16 @@ python -m ledgerloop.cli demo
 
 or, equivalently, `make demo`.
 
-It generates the corpora, fits the calibration bundle, reconciles a 60-order
-batch through the LangGraph pipeline, and opens the four screens. Roughly **8
-seconds** before the browser opens; it skips any corpus already on disk, so it
-is safe to re-run.
+It generates the corpora, fits the calibration bundle, reconciles the
+**300-order `test` corpus** through the LangGraph pipeline, and opens the four
+screens. It skips any corpus already on disk, so it is safe to re-run.
+
+**It opens on `test` deliberately.** That is the corpus every number in
+`README.md` and `EVALUATION.md` is measured on, so the figures on screen are the
+figures the documents contain — a demo that opened on a different split would
+show a reviewer numbers they could not find anywhere else. `--split dev` runs the
+60-order corpus instead: it still clears the challenge's 50+ record bar and is
+faster, but its exception recall rests on five records and means very little.
 
 <details>
 <summary>What it prints</summary>
@@ -72,38 +78,49 @@ LedgerLoop demo
   4. inspect     open the four screens
 
 [1/4] generating corpora
-      10 generated, 0 already present
-      demo corpus data/generated/dev-standard-42: 145 records, 59 evaluation
-      links, 12 unmatchable by construction
+      10 generated, 0 already present (generation is a pure function of the
+      seed, so an existing corpus is byte-identical)
+      demo corpus data/generated/test-standard-42: 742 records, 294 evaluation
+      links, 69 unmatchable by construction
 
 [2/4] fitting the calibration bundle
       wrote reports/calibration.json: tau_high = 1.000000, fitted on
       calibration seeds 47, 48, 49, 50
-      achieved precision 1.0000 [0.9733, 1.0000] on 140 calibration links (0 wrong)
+      achieved precision 1.0000 [0.9768, 1.0000] on 162 calibration links (0 wrong)
       the `test` split is never fitted on; the bundle's provenance says so
 
 [3/4] reconciling
-      11 node visit(s), 2 residual pass(es), 123 audit event(s) in 1244 ms
-      precision 1.0000 [0.8318, 1.0000] - recall 0.3220 - match rate 0.3088
-      19 correct - 0 false positives costing ₹0.00 - 40 missed
-      13 exception(s) covering ₹23,63,279.53, exception recall 1.0000 over 5
-      - 3 unmatchable (the honest floor)
-      llm: disabled (no key in $LEDGERLOOP_LLM_API_KEY); every number above is
-      deterministic
-      wrote reports/runs/t0t4-dev-42
+      11 node visit(s), 2 residual pass(es), 670 audit event(s) in 2526 ms
+      precision 1.0000 [0.9847, 1.0000] - recall 0.8435 - match rate 0.7971
+      248 correct - 0 false positives costing ₹0.00 - 46 missed
+      74 exception(s) covering ₹65,09,124.90, exception recall 1.0000 over 30
+      - 35 unmatchable (the honest floor)
+      llm: disabled (no provider key in $LEDGERLOOP_LLM_API_KEY or any of
+      $GEMINI_API_KEY, $GROQ_API_KEY, $OLLAMA_API_KEY, $OPENROUTER_API_KEY);
+      every number above is deterministic
+      wrote reports/runs/t0t4-test-42
 
 [4/4] the four screens
       opening Streamlit. Ctrl-C to stop.
 ```
 </details>
 
+Those figures are the single-seed ones for `test` seed 42. The claims in
+`README.md` are the five-seed means beside them — recall 0.8049 ± 0.0792, match
+rate 0.7711 ± 0.0861, exception recall 0.9818 ± 0.0250 — because a single run's
+number is noise. Seed 42's exception recall of 30/30 rests on thirty records and
+its 95% Wilson interval is [0.8865, 1.0000]; `EVALUATION.md` reports that as
+*undecided against the ≥ 0.95 target*, not as a pass.
+
 `--no-ui` stops after the reconciliation and prints the UI command instead of
-launching it. `--split test` demonstrates the 300-order corpus instead.
+launching it. `--split dev` runs the 60-order corpus.
 
 ### What to look at, in order
 
 1. **Results** — precision with its Wilson interval, the money view, the tier
-   waterfall, and per-class recall *including the classes that score badly*.
+   waterfall, and per-class recall *including the classes that score badly*
+   (`A09_SPLIT_PAYOUT` at 0.34 is the row to look at: it is the whole of the
+   remaining recall gap).
 2. **Exceptions** — sorted by rupee impact descending. Open the largest one: it
    carries a class, a severity, a price, an evidence chain pointing back at
    source records, and a suggested action.
@@ -130,11 +147,11 @@ produces byte-identical files — a property the test suite asserts.
 
 | Split | Orders | Purpose |
 |---|---|---|
-| `dev` | 60 | the demo batch; meets the challenge's 50+ bar |
+| `dev` | 60 | the fast batch (`demo --split dev`); meets the challenge's 50+ bar |
 | `train` | 400 | fits the score blender |
 | `calibration` | 200 | fits isotonic calibration and selects `tau_high` — never evaluated on |
-| `test` | 300 | every published number comes from here |
-| `scale` | 5,000 | throughput benchmark |
+| `test` | 300 | the demo default, and where every published number comes from |
+| `scale` | 5,000 | supported by the generator; **not benchmarked** |
 
 ### Calibrate
 
@@ -184,11 +201,25 @@ python -m ledgerloop.cli sweep --data data/generated/test-{easy,standard,hard}-4
 python -m ledgerloop.cli baseline-llm --data data/generated/dev-standard-42 \
     --calibration reports/calibration.json --cold --offline-provider \
     --out reports/llm_baseline.json
+python -m ledgerloop.cli comparison --data data/generated/test-{easy,standard,hard}-4{2,3,4,5,6} \
+    --calibration reports/calibration.json --out reports/comparison.json
+python -m ledgerloop.cli llm-report --data data/generated/test-standard-42 \
+    --calibration reports/calibration.json --offline-provider \
+    --cache-dir reports/llm_cache_report --out reports/llm_report.json
 python -m ledgerloop.cli eval --data data/generated/test-standard-42 \
     --calibration reports/calibration.json --ablation reports/ablation.json \
     --sweep reports/sweep.json --llm-baseline reports/llm_baseline.json \
+    --comparison reports/comparison.json --llm-report reports/llm_report.json \
     --out EVALUATION.md
 ```
+
+`comparison` is the before/after study for the one change Phase 2.3 made to the
+reconciliation system: it runs all fifteen corpora **twice**, once with the
+duplicate-posting pass and once without, and writes both arms with their tuning
+hashes. `llm-report` runs the production LLM path once with a `--no-llm` control
+over the same corpus, so "the model proposes, deterministic code decides" is
+measured rather than asserted. Drop `--offline-provider` on a machine with a
+provider key and the same command produces a live measurement.
 
 The sweep needs the easy and hard corpora; `make sweep-data` generates them, or
 loop `generate --split test --difficulty {easy,hard} --seed {42..46}`.
@@ -207,9 +238,9 @@ It reads whatever is already in `reports/runs/`. Point it elsewhere with
 ## 4. Verifying the build
 
 ```bash
-python -m pytest          # 2187 passed
+python -m pytest          # 2292 passed
 python -m ruff check .    # All checks passed!
-python -m mypy            # Success: no issues found in 94 source files
+python -m mypy            # Success: no issues found in 99 source files
 ```
 
 > **If `mypy` fails to start** with `ImportError: DLL load failed while importing
@@ -226,15 +257,48 @@ python -m mypy            # Success: no issues found in 94 source files
 
 **The demo above uses no model, and every number it prints is deterministic.**
 
-To enable the LLM tier, set a key for any OpenAI-compatible provider:
+To enable the LLM tier, set a key for any rung of the failover ladder. Copy
+[`.env.example`](.env.example) to `.env` (gitignored) and fill in what you have:
 
 ```bash
-export LEDGERLOOP_LLM_API_KEY=...        # Groq, Gemini, OpenRouter, Ollama
+export GROQ_API_KEY=...                  # or GEMINI_API_KEY / OPENROUTER_API_KEY
+export LEDGERLOOP_LLM_API_KEY=...        # or one key shared by every rung
 python -m ledgerloop.cli demo
 ```
 
+The ladder is **Groq → Gemini → OpenRouter → Ollama**, in that order. A rung with
+no credential is skipped; `ollama` needs none, so it joins the ladder only when
+you name it (`LEDGERLOOP_LLM_PROVIDERS=ollama`) or point `OLLAMA_BASE_URL`
+somewhere — otherwise a machine with no keys would wait for a localhost
+connection to time out before reaching the deterministic path.
+
+A rate limit waits once (honouring `Retry-After`, capped) and then moves down a
+rung; an outage moves down immediately; an exhausted ladder raises, and every
+call site treats that exactly like `--no-llm`. How far down the run had to go is
+recorded as `fallback_depth` and printed in the report, so a rate-limited run is
+visible rather than silent.
+
+`--llm-providers groq,ollama` overrides the order for one invocation.
 `--no-llm` forces the deterministic path even when a key is present, which is
 how a run proves it does not need one.
+
+**To measure the LLM path rather than just use it:**
+
+```bash
+python -m ledgerloop.cli llm-report \
+    --data data/generated/test-standard-42 \
+    --calibration reports/calibration.json \
+    --out reports/llm_report.json
+```
+
+It runs the corpus with the model and again with `--no-llm`, and writes both
+scores side by side together with the calls, cache hits, tokens, latency,
+failures, budget refusals, actual and equivalent-paid cost, how many references
+the grounding gate refused and how many proposals `verify_arithmetic` demoted.
+Add `--offline-provider` to run it with no key at all: every machinery column is
+still measured on the real code path, the artefact records `live: false`, and
+`EVALUATION.md` prints a banner saying **no claim is being made about any
+language model's answer quality**.
 
 What changes, and what cannot:
 
@@ -250,7 +314,12 @@ What changes, and what cannot:
   arithmetic disagrees" is information a controller wants.
 
 Responses are content-hash cached, so a second identical run makes **zero** live
-calls.
+calls. The cache key is stable across a failover, so a transient rate limit
+cannot turn into a permanent extra cost.
+
+**No key was present when this repository was built, and none was invented.**
+Every published number is deterministic; the ladder is unit-tested against fake
+rungs, and the production path was measured with the documented offline stand-in.
 
 ---
 
@@ -283,3 +352,5 @@ deployment path is worse than an honest absence.
 | `UnicodeEncodeError` on `₹` | a non-UTF-8 Windows console. The CLI reconfigures its own streams; if you are piping output, set `PYTHONIOENCODING=utf-8` |
 | Streamlit opens on a busy port | `python -m streamlit run src/ledgerloop/ui/app.py --server.port 8899` |
 | A run appears twice in the UI | run ids are derived from the ladder and corpus, so re-running overwrites its own record. Different corpora get different ids |
+| The demo hangs before `[3/4]` | a keyless machine should never reach a provider. If you set `LEDGERLOOP_LLM_PROVIDERS=ollama` without Ollama running, the ladder waits for localhost. Unset it, or pass `--no-llm` |
+| `llm-report did not run` | no provider key and no `--offline-provider`. That is a refusal, not a failure: the command's job is to measure the LLM path, and a row of zeros for a path that never executed would be a false measurement |

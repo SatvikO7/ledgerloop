@@ -41,7 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from ledgerloop.config import LLMConfig, RunConfig
+from ledgerloop.config import DuplicateDetection, LLMConfig, RunConfig
 from ledgerloop.eval.metrics import ExceptionCoverage, evaluate, exception_coverage
 from ledgerloop.eval.reliability import (
     CalibrationEvaluation,
@@ -221,6 +221,7 @@ def prepare_run(
     bundle: CalibrationBundle | None = None,
     client: LLMClient | None = None,
     enabled_tiers: tuple[int, ...] | None = None,
+    duplicates: DuplicateDetection | None = None,
     run_id: str | None = None,
 ) -> RunSetup:
     """Read the corpus and settle the configuration. No matching happens here.
@@ -228,6 +229,11 @@ def prepare_run(
     ``enabled_tiers`` drives the ablation. ``None`` means the full ladder, with
     T5 included only when ``client`` is enabled -- a config listing T5 on a
     machine with no key would otherwise report a tier that never ran.
+
+    ``duplicates`` drives the Phase 2.3 before/after comparison the same way:
+    passing ``DuplicateDetection(enabled=False)`` reproduces every pre-Phase-2
+    number exactly, and the value travels in ``RunConfig.tuning_hash`` so a
+    comparison table can witness that nothing else moved between its two arms.
     """
     manifest = load_manifest(directory)
     truth = load_ground_truth(directory)
@@ -245,6 +251,7 @@ def prepare_run(
         seed=manifest.seed,
         enabled_tiers=tiers,
         llm=llm_config,
+        duplicates=duplicates if duplicates is not None else DuplicateDetection(),
     )
     if bundle is not None:
         config = configure_for(config, bundle)
@@ -316,6 +323,7 @@ def run_system(
     bundle: CalibrationBundle | None = None,
     client: LLMClient | None = None,
     enabled_tiers: tuple[int, ...] | None = None,
+    duplicates: DuplicateDetection | None = None,
     run_id: str | None = None,
     measure_calibration_quality: bool = True,
 ) -> SystemRun:
@@ -337,6 +345,7 @@ def run_system(
         bundle=bundle,
         client=client,
         enabled_tiers=enabled_tiers,
+        duplicates=duplicates,
         run_id=run_id,
     )
     config, tiers, truth = setup.config, setup.tiers, setup.truth

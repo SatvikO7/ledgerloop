@@ -53,13 +53,16 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from ledgerloop.agent.graph import langgraph_available
 from ledgerloop.agent.runner import run_graph
 from ledgerloop.agent.store import RUNS_ROOT
 from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
 from ledgerloop.eval.ablation import ABLATION_LADDERS, AblationArtifact, run_ablation
+from ledgerloop.eval.artifacts import ComparisonArtifact, LLMReportArtifact
 from ledgerloop.eval.baselines import run_b0, run_b1
+from ledgerloop.eval.comparison import run_comparison
 from ledgerloop.eval.harness import (
     StaleCalibrationError,
     SystemRun,
@@ -71,6 +74,7 @@ from ledgerloop.eval.llm_baseline import (
     LLMBaselineArtifact,
     run_b2,
 )
+from ledgerloop.eval.llm_report import run_llm_report
 from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.offline_provider import OFFLINE_PROVIDER_NAME, OfflineReasoner
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
@@ -79,7 +83,13 @@ from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.fitting import FittingError, fit_from_corpora, harvest_corpora
 from ledgerloop.generator import generate_to_disk
 from ledgerloop.ingest import IngestError, ingest_dataset
-from ledgerloop.llm.client import LLMClient, build_provider
+from ledgerloop.llm.client import LLMClient
+from ledgerloop.llm.offline_analyst import OFFLINE_ANALYST_NAME, OfflineAnalyst
+from ledgerloop.llm.providers import (
+    PROVIDER_KEY_ENVS,
+    build_ladder,
+    configured_rungs,
+)
 from ledgerloop.matching.blender import DEFAULT_L2
 from ledgerloop.matching.calibration import CalibrationBundle
 from ledgerloop.matching.harvest import DEFAULT_TOP_K
@@ -215,19 +225,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "tiers keep the provisional probabilities they set themselves, which is the "
         "uncalibrated ablation row.",
     )
-    evaluation.add_argument(
-        "--no-llm",
-        action="store_true",
-        help="run the whole pipeline deterministically, with no model and no "
-        "network. The default when no API key is present, so this flag is how a "
-        "run with a key available is made to prove it does not need one.",
-    )
-    evaluation.add_argument(
-        "--llm-key-env",
-        default="LEDGERLOOP_LLM_API_KEY",
-        help="environment variable holding the provider key "
-        "(default LEDGERLOOP_LLM_API_KEY). Absent means the deterministic path.",
-    )
+    _add_llm_flags(evaluation)
     evaluation.add_argument(
         "--show-exceptions",
         type=int,
@@ -254,6 +252,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="an artefact written by `ledgerloop baseline-llm` (B2). Rendering it "
         "makes no calls: a report regenerated twice must not spend quota twice.",
+    )
+    evaluation.add_argument(
+        "--comparison",
+        type=Path,
+        default=None,
+        help="an artefact written by `ledgerloop comparison`, carrying the "
+        "before/after study for a substantive change. Absent renders no section.",
+    )
+    evaluation.add_argument(
+        "--llm-report",
+        type=Path,
+        default=None,
+        help="an artefact written by `ledgerloop llm-report`. Rendering it makes "
+        "no calls: a report regenerated twice must not spend quota twice.",
     )
     evaluation.add_argument(
         "--out",
@@ -299,10 +311,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--split",
         type=SplitName,
         choices=list(SplitName),
-        default=SplitName.DEV,
-        help="which split to reconcile. `dev` is 60 orders -- the challenge asks "
-        "for a 50+ record batch and it reconciles in seconds, so the demo starts "
-        "immediately. The UI's Run tab opens any other corpus on disk.",
+        default=SplitName.TEST,
+        help="which split to reconcile. Defaults to `test` -- 742 records and "
+        "294 evaluation links -- because that is the corpus every number in "
+        "README.md and EVALUATION.md is measured on, and a demo that opened on a "
+        "different one would show a reviewer figures the documents do not "
+        "contain. `--split dev` is the 60-order corpus: it still clears the "
+        "challenge's 50+ bar and is faster, but its exception recall rests on "
+        "five records and means very little. The UI's Run tab opens either.",
     )
     demo.add_argument(
         "--regenerate",
@@ -490,11 +506,85 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("reports/llm_baseline.json"),
         help="artefact destination (default reports/llm_baseline.json)",
     )
+
+    comparison = subparsers.add_parser(
+        "comparison",
+        help="run the headline configuration with and without one change, and "
+        "score both arms over the same corpora",
+    )
+    comparison.add_argument(
+        "--data",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="dataset directories. Every one is run twice -- once per arm.",
+    )
+    comparison.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help="a bundle written by `ledgerloop calibrate`, applied to both arms",
+    )
+    comparison.add_argument(
+        "--out",
+        type=Path,
+        default=Path("reports/comparison.json"),
+        help="artefact destination (default reports/comparison.json)",
+    )
+
+    llm_report = subparsers.add_parser(
+        "llm-report",
+        help="run the production LLM path once, measured, with a no-LLM control",
+    )
+    llm_report.add_argument(
+        "--data",
+        type=Path,
+        required=True,
+        help="a generated dataset directory (as written by `ledgerloop generate`)",
+    )
+    llm_report.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help="a bundle written by `ledgerloop calibrate`",
+    )
+    _add_llm_flags(llm_report)
+    llm_report.add_argument(
+        "--max-calls",
+        type=int,
+        default=30,
+        help="hard budget for this run (default 30). Exceeding it aborts the LLM "
+        "path rather than quietly burning free-tier quota, and the artefact "
+        "counts the refusals.",
+    )
+    llm_report.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="response cache for this run (default the configured production "
+        "cache). Point it somewhere empty to measure a cold run.",
+    )
+    llm_report.add_argument(
+        "--offline-provider",
+        action="store_true",
+        help="drive the run with the prompt-reading stand-in in "
+        "`llm/offline_analyst.py` instead of a live model. Every call, token, "
+        "cache, latency, failure and gate figure is then still measured on the "
+        "real code path, but NOTHING here is a claim about a language model's "
+        "answer quality -- the artefact records `live: false` and the printed "
+        "summary says so. Drop the flag on a machine with a provider key.",
+    )
+    llm_report.add_argument(
+        "--out",
+        type=Path,
+        default=Path("reports/llm_report.json"),
+        help="artefact destination (default reports/llm_report.json)",
+    )
     return parser
 
 
 def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
-    """``--no-llm`` and ``--llm-key-env``, identical on every command that runs.
+    """``--no-llm``, ``--llm-key-env`` and ``--llm-providers`` on every command.
 
     One helper rather than four copies: a flag that meant something slightly
     different on the ablation command than on ``eval`` would make the ablation's
@@ -511,8 +601,19 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--llm-key-env",
         default="LEDGERLOOP_LLM_API_KEY",
-        help="environment variable holding the provider key "
-        "(default LEDGERLOOP_LLM_API_KEY). Absent means the deterministic path.",
+        help="environment variable holding a key shared by every rung of the "
+        "provider ladder (default LEDGERLOOP_LLM_API_KEY). Per-provider "
+        "variables -- GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY -- take "
+        "precedence. None of them set means the deterministic path.",
+    )
+    parser.add_argument(
+        "--llm-providers",
+        default=None,
+        help="comma-separated failover ladder, overriding "
+        "LEDGERLOOP_LLM_PROVIDERS and the default "
+        "groq,gemini,openrouter,ollama. A rung with no credential is skipped, "
+        "except ollama, which needs none and is therefore only used when it is "
+        "named here or given a base URL.",
     )
 
 
@@ -693,17 +794,50 @@ def _client_for(args: argparse.Namespace, *, max_calls: int | None = None) -> LL
     accident. Both return a real :class:`LLMClient` whose ``enabled`` is False,
     so every call site sees one type and the deterministic path is a branch
     rather than a second object graph.
+
+    From Phase 2.2 the provider is a **ladder** rather than a single endpoint.
+    Nothing above this line changed: the ladder satisfies the same one-method
+    protocol, so the cache, the budget, the validation, the gates and the cost
+    ledger sit exactly where they were.
     """
     wanted = not args.no_llm
-    api_key = os.environ.get(args.llm_key_env) if wanted else None
     config = LLMConfig(enabled=wanted)
     if max_calls is not None:
         config = config.model_copy(update={"max_calls_per_run": max_calls})
-    return LLMClient(config=config, provider=build_provider(config, api_key=api_key))
+    if not wanted:
+        return LLMClient(config=config, provider=None)
+    ladder = build_ladder(config, environ=_llm_env(args), order=_llm_order(args))
+    return LLMClient(config=config, provider=ladder)
+
+
+def _llm_env(args: argparse.Namespace) -> dict[str, str]:
+    """The environment the ladder reads, with ``--llm-key-env`` folded in.
+
+    A custom key variable is copied into the slot the ladder treats as the
+    shared credential, so ``--llm-key-env MY_KEY`` keeps working exactly as it
+    did at Step 9 rather than becoming a flag the ladder quietly ignores.
+    """
+    env = dict(os.environ)
+    key = env.get(args.llm_key_env)
+    if key:
+        env["LEDGERLOOP_LLM_API_KEY"] = key
+    return env
+
+
+def _llm_order(args: argparse.Namespace) -> tuple[str, ...] | None:
+    raw = getattr(args, "llm_providers", None)
+    if not raw:
+        return None
+    return tuple(part.strip().lower() for part in str(raw).split(",") if part.strip())
 
 
 def _llm_disabled_reason(args: argparse.Namespace) -> str:
-    return "--no-llm" if args.no_llm else f"no key in ${args.llm_key_env}"
+    if args.no_llm:
+        return "--no-llm"
+    return (
+        f"no provider key in ${args.llm_key_env} or any of "
+        + ", ".join(f"${name}" for name in sorted(set(PROVIDER_KEY_ENVS.values())))
+    )
 
 
 def _resolve_bundle(path: Path | None, directory: Path) -> CalibrationBundle | None:
@@ -717,6 +851,16 @@ def _resolve_bundle(path: Path | None, directory: Path) -> CalibrationBundle | N
     if not path.is_file():
         raise FileNotFoundError(f"no such calibration bundle: {path}")
     return load_bundle_for(path, load_manifest(directory))
+
+
+def _distinct_probabilities(run: SystemRun) -> tuple[float, ...]:
+    """Every distinct calibrated probability the run's decisions carried.
+
+    Ascending, so the report can print the distribution rather than assert it.
+    Two values is the bimodal shape that makes the three-way policy behave
+    two-way, and that claim is only checkable if the values are shown.
+    """
+    return tuple(sorted({decision.calibrated_p for decision in run.matched.decisions}))
 
 
 def _negative_counters(run: SystemRun) -> tuple[tuple[str, str, int], ...]:
@@ -819,6 +963,8 @@ def _run_eval(args: argparse.Namespace) -> int:
             auto_matched=run.auto_matched,
             review_queue=run.needs_review,
             negatives=_negative_counters(run),
+            bundle=bundle,
+            review_band_probabilities=_distinct_probabilities(run),
         )
     ]
     for baseline in (run_b0(directory), run_b1(directory)):
@@ -837,7 +983,6 @@ def _run_eval(args: argparse.Namespace) -> int:
     artifacts = _load_artifacts(args)
     if artifacts is None:
         return 1
-    llm_baseline, ablation, sweep = artifacts
 
     write_report(
         args.out,
@@ -845,12 +990,19 @@ def _run_eval(args: argparse.Namespace) -> int:
             scored,
             manifest=manifest,
             truth=truth,
-            llm_baseline=llm_baseline,
-            ablation=ablation,
-            sweep=sweep,
+            llm_baseline=artifacts.llm_baseline,
+            ablation=artifacts.ablation,
+            sweep=artifacts.sweep,
+            comparison=artifacts.comparison,
+            llm_report=artifacts.llm_report,
         ),
     )
 
+    llm_baseline, ablation, sweep = (
+        artifacts.llm_baseline,
+        artifacts.ablation,
+        artifacts.sweep,
+    )
     print(f"evaluated {directory} ({manifest.split.value}, seed {manifest.seed})")
     for item in scored:
         links = item.metrics.link_metrics
@@ -975,10 +1127,18 @@ def _run_eval(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_artifacts(
-    args: argparse.Namespace,
-) -> tuple[LLMBaselineArtifact | None, AblationArtifact | None, SweepArtifact | None] | None:
-    """Read the three optional artefacts, or report which one is unreadable.
+class _Artifacts(NamedTuple):
+    """The optional artefacts ``eval`` renders sections from."""
+
+    llm_baseline: LLMBaselineArtifact | None = None
+    ablation: AblationArtifact | None = None
+    sweep: SweepArtifact | None = None
+    comparison: ComparisonArtifact | None = None
+    llm_report: LLMReportArtifact | None = None
+
+
+def _load_artifacts(args: argparse.Namespace) -> _Artifacts | None:
+    """Read the optional artefacts, or report which one is unreadable.
 
     A missing path is an absent section. A path that exists and will not parse
     is an error, not an absence: silently omitting a section the caller asked
@@ -989,6 +1149,8 @@ def _load_artifacts(
         (args.llm_baseline, LLMBaselineArtifact.load, "--llm-baseline"),
         (args.ablation, AblationArtifact.load, "--ablation"),
         (args.sweep, SweepArtifact.load, "--sweep"),
+        (getattr(args, "comparison", None), ComparisonArtifact.load, "--comparison"),
+        (getattr(args, "llm_report", None), LLMReportArtifact.load, "--llm-report"),
     ):
         if path is None:
             loaded.append(None)
@@ -1001,11 +1163,13 @@ def _load_artifacts(
         except ValueError as exc:
             print(f"{label} artefact {path} did not parse: {exc}", file=sys.stderr)
             return None
-    baseline, ablation, sweep = loaded
+    baseline, ablation, sweep, comparison, llm_report = loaded
     assert baseline is None or isinstance(baseline, LLMBaselineArtifact)
     assert ablation is None or isinstance(ablation, AblationArtifact)
     assert sweep is None or isinstance(sweep, SweepArtifact)
-    return baseline, ablation, sweep
+    assert comparison is None or isinstance(comparison, ComparisonArtifact)
+    assert llm_report is None or isinstance(llm_report, LLMReportArtifact)
+    return _Artifacts(baseline, ablation, sweep, comparison, llm_report)
 
 
 #: The corpora the calibration bundle is fitted from.
@@ -1032,6 +1196,174 @@ def _generate_if_absent(
         return False
     generate_to_disk(config, directory)
     return True
+
+
+def _run_comparison(args: argparse.Namespace) -> int:
+    """Both arms of the Phase 2.3 change, over the same corpora.
+
+    The switch under test is `RunConfig.duplicates.enabled` and nothing else. It
+    is not a CLI flag here on purpose: a comparison whose arms the caller could
+    define would be a comparison whose meaning changed with the invocation, and
+    the artefact would then have to be read alongside the command line that
+    produced it.
+    """
+    directories: list[Path] = list(args.data)
+    try:
+        bundle = _resolve_bundle(args.calibration, directories[0])
+    except (FileNotFoundError, StaleCalibrationError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        artifact = run_comparison(directories, bundle=bundle)
+    except ValueError as exc:
+        print(f"comparison refused: {exc}", file=sys.stderr)
+        return 1
+    artifact.save(args.out)
+
+    print(f"comparison over {len(directories)} corpus/corpora: {artifact.change}")
+    for row in artifact.rows:
+        before, after = row.before, row.after
+        print(
+            f"  {row.difficulty:9s} recall "
+            f"{before.of('recall').rendered()} -> {after.of('recall').rendered()} "
+            f"({row.delta('recall'):+.4f})"
+        )
+        print(
+            f"            match rate "
+            f"{before.of('match_rate').rendered()} -> "
+            f"{after.of('match_rate').rendered()} "
+            f"({row.delta('match_rate'):+.4f})"
+        )
+        print(
+            f"            precision "
+            f"{before.of('precision').rendered()} -> "
+            f"{after.of('precision').rendered()} - false positives "
+            f"{int(before.of('false_positives').mean * len(before.runs))} -> "
+            f"{int(after.of('false_positives').mean * len(after.runs))}"
+        )
+        print(f"            tuning hash {before.tuning_hash} -> {after.tuning_hash}")
+    print(
+        "  precision held at every difficulty and on every seed"
+        if artifact.precision_held_everywhere
+        else "  WARNING: the after arm produced false positives"
+    )
+    print(f"  wrote {args.out}")
+    return 0
+
+
+def _run_llm_report(args: argparse.Namespace) -> int:
+    """One measured run of the production LLM path, with its own control.
+
+    Refuses rather than degrades when a live run was asked for and no provider
+    is reachable. Every other command in this project falls back to the
+    deterministic path when there is no key, and that is right for them --
+    their job is to produce a reconciliation. This command's job is to produce
+    a *measurement of the LLM path*, and silently measuring nothing would put a
+    row of zeros where a reader expects an observation.
+    """
+    directory: Path = args.data
+    config = LLMConfig(enabled=not args.no_llm, max_calls_per_run=args.max_calls)
+    if args.cache_dir is not None:
+        config = config.model_copy(update={"cache_dir": args.cache_dir})
+
+    live = False
+    provider: object | None = None
+    if args.offline_provider:
+        provider = OfflineAnalyst()
+    elif config.enabled:
+        provider = build_ladder(config, environ=_llm_env(args), order=_llm_order(args))
+        live = provider is not None
+
+    if provider is None:
+        reason = _llm_disabled_reason(args)
+        artifact = LLMReportArtifact(ran=False, reason=reason)
+        artifact.save(args.out)
+        print(f"llm-report did not run: {reason}")
+        print(f"      wrote {args.out} recording that it did not run")
+        print("      a row of zeros for a path that never executed would be a")
+        print("      false measurement, so none is written")
+        return 0
+
+    rungs = configured_rungs(config, environ=_llm_env(args), order=_llm_order(args))
+    client = LLMClient(config=config, provider=provider)  # type: ignore[arg-type]
+    try:
+        bundle = _resolve_bundle(args.calibration, directory)
+    except (FileNotFoundError, StaleCalibrationError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    artifact = run_llm_report(directory, client=client, bundle=bundle, live=live)
+    artifact.save(args.out)
+
+    print(f"llm-report on {directory}")
+    if live:
+        print(
+            f"      LIVE: ladder {' -> '.join(spec.name for spec in rungs)}; "
+            f"{artifact.provider_used} answered at fallback depth "
+            f"{artifact.fallback_depth}"
+        )
+    else:
+        print(
+            f"      OFFLINE: answered by `{OFFLINE_ANALYST_NAME}`, a documented "
+            "rule that reads the prompt and nothing else."
+        )
+        print(
+            "      Calls, tokens, latency, cache, failures and every gate figure "
+            "below are measured"
+        )
+        print(
+            "      machinery. NO claim is made here about any language model's "
+            "answer quality."
+        )
+    for failure in artifact.provider_failures:
+        print(f"      rung declined - {failure}")
+    cost = artifact.cost
+    print(
+        f"      {cost.llm_calls} call(s), {cost.cache_hits} cache hit(s), "
+        f"{cost.total_tokens} token(s), {cost.wall_clock_ms} ms of provider time"
+    )
+    print(
+        f"      {artifact.calls_per_100_records:.2f} call(s) per 100 records; "
+        f"actual Rs {cost.actual_cost_inr:.2f}, equivalent paid Rs "
+        f"{cost.equivalent_paid_cost_inr:.2f}"
+    )
+    print(
+        f"      {artifact.calls_refused} call(s) refused, "
+        f"{artifact.validation_failures} schema failure(s) retried"
+    )
+    print(
+        f"      narrations {artifact.narrations_accepted}/"
+        f"{artifact.narrations_offered} accepted - proposals "
+        f"{artifact.proposals_accepted}/{artifact.proposals_returned} accepted - "
+        f"{artifact.rejected_ungrounded} ungrounded refused - "
+        f"{artifact.demoted} demoted on arithmetic"
+    )
+    with_llm, without = artifact.with_llm, artifact.without_llm
+    print(
+        f"      with the model:    precision {with_llm.precision:.4f} - recall "
+        f"{with_llm.recall:.4f} - match rate {with_llm.match_rate:.4f} - "
+        f"exception recall {with_llm.exception_recall:.4f}"
+    )
+    print(
+        f"      without the model: precision {without.precision:.4f} - recall "
+        f"{without.recall:.4f} - match rate {without.match_rate:.4f} - "
+        f"exception recall {without.exception_recall:.4f}"
+    )
+    if artifact.metrics_unchanged:
+        print("      the model changed no published metric")
+    else:
+        print(
+            "      a published metric moved: the model's accepted narration "
+            "repairs changed what the"
+        )
+        print(
+            "      deterministic ladder had to read. Every decision above was "
+            "still made by the ladder,"
+        )
+        print("      the policy and verify_arithmetic -- see the two rows.")
+    print(f"      wrote {args.out}")
+    return 0
 
 
 def _run_demo(args: argparse.Namespace) -> int:
@@ -1600,6 +1932,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_eval(args)
     if args.command == "run":
         return _run_pipeline(args)
+    if args.command == "comparison":
+        return _run_comparison(args)
+    if args.command == "llm-report":
+        return _run_llm_report(args)
     if args.command == "demo":
         return _run_demo(args)
     if args.command == "ablation":

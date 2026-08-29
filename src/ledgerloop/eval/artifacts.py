@@ -1,9 +1,15 @@
-"""The serialised results of Step 10's three expensive commands.
+"""The serialised results of the evaluation's expensive commands.
 
 The models only. The code that *produces* them lives in
-:mod:`ledgerloop.eval.ablation`, :mod:`ledgerloop.eval.sweep` and
-:mod:`ledgerloop.eval.llm_baseline`, and the separation is load-bearing rather
+:mod:`ledgerloop.eval.ablation`, :mod:`ledgerloop.eval.sweep`,
+:mod:`ledgerloop.eval.llm_baseline`, :mod:`ledgerloop.eval.comparison` and
+:mod:`ledgerloop.eval.llm_report`, and the separation is load-bearing rather
 than tidy.
+
+Phase 2 added two more artefacts and proved the rule the hard way: putting
+``ComparisonArtifact`` beside ``run_comparison`` closed exactly the cycle this
+docstring warns about, and the import error surfaced four files from the cause.
+The models came back here.
 
 WHY THE MODELS ARE SPLIT FROM THE RUNNERS
 -----------------------------------------
@@ -38,9 +44,15 @@ from ledgerloop.models.base import FrozenLedgerModel, MinorUnits
 from ledgerloop.models.metrics import CostLedger
 
 __all__ = [
+    "COMPARED_METRICS",
     "AblationArtifact",
     "AblationRow",
+    "ComparisonArm",
+    "ComparisonArtifact",
+    "ComparisonRow",
     "LLMBaselineArtifact",
+    "LLMReportArtifact",
+    "RunScore",
     "SweepArtifact",
     "SweepGroup",
 ]
@@ -275,3 +287,200 @@ class LLMBaselineArtifact(_SavedArtifact):
         if theirs <= 0 or not self.system_ran:
             return 0.0
         return self.cost.total_tokens / theirs
+
+
+#: What the before/after table reports. A subset of the sweep's metrics, chosen
+#: because these are the ones the change could plausibly move -- and including
+#: the two it must **not** move (precision, false positives) is the point.
+COMPARED_METRICS: tuple[str, ...] = (
+    "precision",
+    "recall",
+    "match_rate",
+    "exception_recall",
+    "false_positives",
+    "false_positive_cost_minor",
+    "auto_matched",
+)
+
+
+class ComparisonArm(FrozenLedgerModel):
+    """One configuration, over one difficulty's seeds."""
+
+    label: str
+    difficulty: str
+    seeds: tuple[int, ...]
+    tuning_hash: str = Field(
+        default="",
+        description="The tunables alone. Two arms differing here by more than "
+        "the switch under test are two experiments, not one comparison.",
+    )
+    runs: tuple[RunSummary, ...] = ()
+    aggregates: dict[str, Aggregate] = Field(default_factory=dict)
+
+    def of(self, metric: str) -> Aggregate:
+        return self.aggregates.get(metric, Aggregate(metric=metric, count=0))
+
+
+class ComparisonRow(FrozenLedgerModel):
+    """One difficulty, both arms, ready to render as a before/after line."""
+
+    difficulty: str
+    before: ComparisonArm
+    after: ComparisonArm
+
+    def delta(self, metric: str) -> float:
+        """After minus before, on the mean. A difference, not a test."""
+        return self.after.of(metric).mean - self.before.of(metric).mean
+
+    @property
+    def precision_held(self) -> bool:
+        """Whether the change cost any precision at all, on any seed.
+
+        The one question the whole comparison exists to answer honestly. A
+        recall gain bought with a false positive is not an improvement in this
+        project, and this reads the false-positive **count** rather than the
+        precision ratio -- a ratio can round, a count cannot.
+        """
+        return all(row.false_positives == 0 for row in self.after.runs)
+
+
+class ComparisonArtifact(_SavedArtifact):
+    """The whole before/after study, serialisable so the report never re-runs it."""
+
+    change: str = Field(description="What differs between the arms, in one line.")
+    before_label: str
+    after_label: str
+    split: str
+    generator_version: str
+    calibrated: bool
+    rows: tuple[ComparisonRow, ...] = ()
+
+    @property
+    def headline(self) -> ComparisonRow | None:
+        """The standard-difficulty row -- the one every headline claim quotes."""
+        for row in self.rows:
+            if row.difficulty == "standard":
+                return row
+        return self.rows[0] if self.rows else None
+
+    @property
+    def precision_held_everywhere(self) -> bool:
+        """Zero false positives in the after arm, at every difficulty."""
+        return bool(self.rows) and all(row.precision_held for row in self.rows)
+
+    @property
+    def seeds(self) -> tuple[int, ...]:
+        return self.rows[0].after.seeds if self.rows else ()
+
+
+class RunScore(_SavedArtifact):
+    """The four headline figures of one run, so two runs can be compared."""
+
+    precision: float = Field(default=0.0, ge=0.0, le=1.0)
+    recall: float = Field(default=0.0, ge=0.0, le=1.0)
+    match_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    exception_recall: float = Field(default=0.0, ge=0.0, le=1.0)
+    auto_matched: int = Field(default=0, ge=0)
+    false_positives: int = Field(default=0, ge=0)
+
+
+
+class LLMReportArtifact(_SavedArtifact):
+    """What one measured LLM run cost, was refused, and did not change."""
+
+    ran: bool = Field(
+        description="False when no provider was reachable and none was asked "
+        "for. Every column below is then meaningless and the report says so "
+        "rather than printing zeros."
+    )
+    reason: str = Field(default="", description="Why it did not run, when it did not.")
+
+    live: bool = Field(
+        default=False,
+        description="True only when a real provider on the ladder answered. "
+        "False means the offline analyst did, and no figure here is a claim "
+        "about any language model's answer quality.",
+    )
+    provider_used: str | None = Field(
+        default=None, description="The rung that answered, or the stand-in's name."
+    )
+    ladder: tuple[str, ...] = Field(
+        default=(),
+        description="The rungs that were reachable, in the order they would be "
+        "tried. One entry is not a ladder and the report says so.",
+    )
+    fallback_depth: int = Field(
+        default=0,
+        ge=0,
+        description="How far down the ladder the run had to go at its worst. "
+        "Zero means the first rung answered every time.",
+    )
+    provider_failures: tuple[str, ...] = Field(
+        default=(),
+        description="One line per rung that declined, with its error and how "
+        "many attempts it took to give up. Empty for a single-rung run.",
+    )
+
+    split: str = ""
+    difficulty: str = ""
+    seed: int = 0
+    generator_version: str = ""
+    record_count: int = Field(default=0, ge=0)
+
+    # --- what the model was asked, and what survived ---
+    narrations_offered: int = Field(
+        default=0, ge=0, description="Narrations the regex layer could not read."
+    )
+    narrations_accepted: int = Field(default=0, ge=0)
+    proposals_returned: int = Field(default=0, ge=0)
+    proposals_accepted: int = Field(default=0, ge=0)
+    rejected_ungrounded: int = Field(
+        default=0,
+        ge=0,
+        description="References the model returned that were not in the pack it "
+        "was given. Refused by the grounding gate.",
+    )
+    rejected_unverified: int = Field(
+        default=0,
+        ge=0,
+        description="Proposals whose money did not close when re-derived from "
+        "the sources. Demoted to review, not dropped.",
+    )
+    demoted: int = Field(
+        default=0,
+        ge=0,
+        description="The same proposals, counted where the pipeline records "
+        "them: a candidate carrying its own arithmetic failure as evidence.",
+    )
+    explanations_accepted: int = Field(default=0, ge=0)
+    calls_refused: int = Field(
+        default=0,
+        ge=0,
+        description="Calls the budget, an outage or a schema failure stopped. A "
+        "run survives every one of them.",
+    )
+    validation_failures: int = Field(default=0, ge=0)
+
+    cost: CostLedger = Field(default_factory=CostLedger)
+    wall_clock_ms: int = Field(default=0, ge=0)
+
+    # --- the control ---
+    with_llm: RunScore = Field(default_factory=RunScore)
+    without_llm: RunScore = Field(default_factory=RunScore)
+
+    @property
+    def metrics_unchanged(self) -> bool:
+        """Whether removing the model moved any headline figure.
+
+        See the module docstring: ``False`` means an accepted narration repair
+        changed what the ladder read, not that the model decided anything.
+        """
+        return self.with_llm == self.without_llm
+
+    @property
+    def calls_per_100_records(self) -> float:
+        return self.cost.calls_per_100_records(self.record_count)
+
+    @property
+    def is_standin(self) -> bool:
+        return self.ran and not self.live

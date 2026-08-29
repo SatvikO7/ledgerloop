@@ -67,6 +67,7 @@ __all__ = [
     "LLMValidationError",
     "OpenAICompatibleProvider",
     "Provider",
+    "RateLimited",
     "ScriptedProvider",
 ]
 
@@ -77,6 +78,26 @@ class LLMError(RuntimeError):
 
 class LLMUnavailable(LLMError):
     """The provider could not be reached, or refused: timeout, 429, 5xx, garbage."""
+
+
+class RateLimited(LLMUnavailable):
+    """A 429. A *subclass* of unavailable, which is the whole design.
+
+    Every call site that already catches :class:`LLMUnavailable` keeps working
+    unchanged and keeps degrading to the deterministic answer. What the subclass
+    adds is for the one caller that can do better than degrade -- the provider
+    ladder, which waits and retries a rate limit and does **not** wait for a
+    misconfigured endpoint, because those are different problems wearing the
+    same HTTP status shape.
+
+    ``retry_after_s`` is the provider's own ``Retry-After`` header when it sent
+    one, parsed as seconds and ``None`` otherwise. It is a hint the ladder caps;
+    see :meth:`~ledgerloop.llm.providers.FailoverProvider._wait_for`.
+    """
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class LLMValidationError(LLMError):
@@ -125,11 +146,11 @@ class OpenAICompatibleProvider:
     shape, which is why PLAN.md 10 chose it: swapping provider is a base URL
     and a key, not a rewrite.
 
-    The provider **failover ladder** (Groq -> Gemini -> OpenRouter -> Ollama) is
-    a Step 14 stretch item and is not implemented here. What is implemented is
-    the thing the ladder would need: a single narrow protocol, an error type
-    that means "this backend did not answer", and call sites that already
-    degrade gracefully when it is raised.
+    This class is **one rung**. The failover ladder (Groq -> Gemini ->
+    OpenRouter -> Ollama) is :class:`~ledgerloop.llm.providers.FailoverProvider`,
+    which composes several of these behind the same one-method protocol -- so
+    nothing above this line, cache or budget or validation or ledger, knows
+    whether it is talking to one provider or four.
     """
 
     name: str
@@ -160,7 +181,12 @@ class OpenAICompatibleProvider:
         try:
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:  # rate limits and server errors
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                raise RateLimited(
+                    f"{self.name} rate-limited this run (HTTP 429)",
+                    retry_after_s=_retry_after_seconds(exc),
+                ) from exc
             raise LLMUnavailable(f"{self.name} returned HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             raise LLMUnavailable(f"{self.name} did not respond: {exc}") from exc
@@ -350,14 +376,27 @@ class LLMClient:
     def ledger(self) -> CostLedger:
         """The cost record for this run.
 
-        ``actual_cost_inr`` is ₹0 by construction -- the free tier is the whole
-        point -- so the interesting figure is what the same tokens would have
-        cost on a paid frontier API. Reporting both is what turns "we used an
-        LLM sparingly" from a claim into a number.
+        ``actual_cost_inr`` is computed from the rung that answered, through
+        :attr:`price_inr_per_mtok`, rather than hardcoded to zero. On every
+        provider this project is configured for that arithmetic *produces* zero,
+        which is the point: the figure is measured and happens to be free, not
+        asserted to be free. A paid rung would put a real number here with no
+        other change.
+
+        The interesting figure beside it stays ``equivalent_paid_cost_inr`` --
+        what the same tokens would have cost on a paid frontier API -- because
+        that is what quantifies what deterministic-first buys.
+
+        ``fallback_depth`` is how far down the ladder this run had to go at its
+        worst, so a rate-limited run is visible in the report rather than silent.
         """
         equivalent = (
             self.prompt_tokens * PROMPT_INR_PER_MTOK
             + self.completion_tokens * COMPLETION_INR_PER_MTOK
+        ) / 1_000_000
+        prompt_price, completion_price = self.price_inr_per_mtok
+        actual = (
+            self.prompt_tokens * prompt_price + self.completion_tokens * completion_price
         ) / 1_000_000
         return CostLedger(
             llm_calls=self.calls,
@@ -365,11 +404,80 @@ class LLMClient:
             prompt_tokens=self.prompt_tokens,
             completion_tokens=self.completion_tokens,
             wall_clock_ms=self.latency_ms,
-            actual_cost_inr=0.0,
+            actual_cost_inr=round(actual, 4),
             equivalent_paid_cost_inr=round(equivalent, 4),
-            provider_used=self.provider.name if self.provider is not None else None,
-            fallback_depth=0,
+            provider_used=self.provider_used,
+            fallback_depth=self.fallback_depth,
         )
+
+    @property
+    def provider_used(self) -> str | None:
+        """Which backend actually replied.
+
+        For a ladder that is the rung that answered, not the ladder's own
+        identity -- ``FailoverProvider.name`` is a stable cache key and would
+        report ``ladder:groq>gemini>...`` here, which is what was *tried* rather
+        than what answered.
+        """
+        if self.provider is None:
+            return None
+        answered = getattr(self.provider, "answered_by", None)
+        return str(answered) if answered else self.provider.name
+
+    @property
+    def price_inr_per_mtok(self) -> tuple[float, float]:
+        """(prompt, completion) rupees per million tokens for the rung in use.
+
+        Looked up by the provider's *name*, so a scripted or offline provider --
+        which has no price because it has no vendor -- reads (0, 0) and cannot
+        contribute a rupee to a spend figure it did not incur.
+        """
+        from ledgerloop.llm.providers import PROVIDER_PRICES_INR_PER_MTOK
+
+        used = self.provider_used
+        if used is None:
+            return (0.0, 0.0)
+        return PROVIDER_PRICES_INR_PER_MTOK.get(used, (0.0, 0.0))
+
+    @property
+    def fallback_depth(self) -> int:
+        """How far down the provider ladder this run went, or 0 for one rung."""
+        return int(getattr(self.provider, "max_fallback_depth", 0) or 0)
+
+    @property
+    def provider_failure_detail(self) -> tuple[str, ...]:
+        """One line per rung the ladder tried and lost, for the report.
+
+        Empty for a single-provider run, which is the honest rendering: there
+        was no ladder to walk, so there is nothing to say about the walk.
+        """
+        trail = getattr(self.provider, "trail", ())
+        return tuple(
+            f"{rung.provider}: {rung.error} (after {rung.attempts} attempt(s))"
+            for rung in trail
+            if getattr(rung, "error", None)
+        )
+
+
+def _retry_after_seconds(error: urllib.error.HTTPError) -> float | None:
+    """The ``Retry-After`` header in seconds, or ``None``.
+
+    Only the delta-seconds form is read. The HTTP-date form is legal and rare,
+    and parsing it would require trusting this machine's clock against the
+    provider's -- a wait computed from a clock skew is worse than the ladder's
+    own bounded backoff, which is what ``None`` falls back to.
+    """
+    header = None
+    headers = getattr(error, "headers", None)
+    if headers is not None:
+        header = headers.get("Retry-After")
+    if header is None:
+        return None
+    try:
+        seconds = float(str(header).strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def _strip_fences(text: str) -> str:

@@ -309,10 +309,30 @@ class TestTheSystemRunsWithoutAModel:
     def test_a_missing_key_reaches_the_same_place_as_the_flag(
         self, dataset, tmp_path, capsys, monkeypatch
     ):
-        monkeypatch.delenv("LEDGERLOOP_LLM_API_KEY", raising=False)
+        """No credential anywhere on the ladder, so no ladder is built at all.
+
+        The message names every variable it looked at rather than only the
+        shared one: since Phase 2.2 a rung can be enabled by its own key, and a
+        reader told "no key in $LEDGERLOOP_LLM_API_KEY" would not know that
+        $GROQ_API_KEY was also checked and also absent.
+        """
+        for name in (
+            "LEDGERLOOP_LLM_API_KEY",
+            "LEDGERLOOP_LLM_PROVIDERS",
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OLLAMA_API_KEY",
+            "OLLAMA_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
         code = main(["eval", "--data", str(dataset), "--out", str(tmp_path / "E.md")])
         assert code == 0
-        assert "llm: disabled (no key in $LEDGERLOOP_LLM_API_KEY)" in capsys.readouterr().out
+
+        printed = capsys.readouterr().out
+        assert "llm: disabled (no provider key in $LEDGERLOOP_LLM_API_KEY" in printed
+        assert "$GROQ_API_KEY" in printed
+        assert "every number above is deterministic" in printed
 
     def test_the_metrics_are_identical_with_and_without_the_flag(self, dataset, tmp_path):
         """An absent key and an explicit refusal must not measure differently."""
