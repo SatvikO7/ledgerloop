@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from ledgerloop.config import DuplicateDetection
+from ledgerloop.config import DuplicateDetection, SplitCompletion
 from ledgerloop.eval.artifacts import ComparisonArm, ComparisonArtifact, ComparisonRow
 from ledgerloop.eval.harness import SystemRun, run_system
 from ledgerloop.eval.summary import aggregate
@@ -66,23 +66,47 @@ def _arm(label: str, runs: Sequence[SystemRun]) -> ComparisonArm:
     )
 
 
+#: The changes this command knows how to compare, as data.
+#:
+#: One entry per switchable change, and a change is only switchable if it is a
+#: *behaviour* the project chose rather than a defect it fixed. Phase 2.5's
+#: corrected allocation denominator is deliberately **absent**: a switch for a
+#: bug is an invitation to run the buggy arm, and its effect is measured against
+#: the previous commit instead (``.local/steps/phase-2-5.md`` section 5).
+COMPARABLE: dict[str, tuple[str, str, str]] = {
+    "duplicates": (
+        "the duplicate-posting pass over the bank statement, before the tier ladder",
+        "without the pass",
+        "with the pass",
+    ),
+    "split-completion": (
+        "split completion -- T2's arithmetic over a tranche set T3's merchant "
+        "master supplies, for payouts whose every tranche lost its reference",
+        "without split completion",
+        "with split completion",
+    ),
+}
+
+
 def run_comparison(
     directories: Sequence[Path],
     *,
     bundle: CalibrationBundle | None = None,
-    before: DuplicateDetection | None = None,
-    after: DuplicateDetection | None = None,
-    change: str = (
-        "the duplicate-posting pass over the bank statement, before the tier ladder"
-    ),
-    before_label: str = "without the pass",
-    after_label: str = "with the pass",
+    switch: str = "split-completion",
+    change: str | None = None,
+    before_label: str | None = None,
+    after_label: str | None = None,
 ) -> ComparisonArtifact:
     """Run every corpus twice -- once per arm -- and group the pair by difficulty.
 
     The same directories, the same bundle, the same full ladder, in both arms.
-    Only ``duplicates`` differs, and both arms' ``tuning_hash`` values are
-    recorded so a reader can see that.
+    Exactly one ``RunConfig`` field differs -- the one ``switch`` names -- and
+    both arms' ``tuning_hash`` values are recorded so a reader can see that.
+
+    ``switch`` defaults to the most recent change, because a comparison run with
+    no argument should describe the thing that most recently needs defending.
+    The older arms stay reachable: they are what says an earlier gain has not
+    been quietly undone.
 
     Corpora are grouped by the difficulty their own manifest declares, never by
     anything the caller asserts -- a directory named wrongly cannot land in the
@@ -90,9 +114,22 @@ def run_comparison(
     """
     if not directories:
         raise ValueError("a comparison needs at least one dataset directory")
+    if switch not in COMPARABLE:
+        raise ValueError(
+            f"unknown switch {switch!r}; known: " + ", ".join(sorted(COMPARABLE))
+        )
 
-    before_config = before if before is not None else DuplicateDetection(enabled=False)
-    after_config = after if after is not None else DuplicateDetection()
+    default_change, default_before, default_after = COMPARABLE[switch]
+    change = change or default_change
+    before_label = before_label or default_before
+    after_label = after_label or default_after
+
+    if switch == "duplicates":
+        before_arm: dict[str, object] = {"duplicates": DuplicateDetection(enabled=False)}
+        after_arm: dict[str, object] = {"duplicates": DuplicateDetection()}
+    else:
+        before_arm = {"split_completion": SplitCompletion(enabled=False)}
+        after_arm = {"split_completion": SplitCompletion()}
 
     grouped: dict[str, dict[str, list[SystemRun]]] = {}
     versions: set[str] = set()
@@ -102,14 +139,14 @@ def run_comparison(
             "before": run_system(
                 directory,
                 bundle=bundle,
-                duplicates=before_config,
                 measure_calibration_quality=False,
+                **before_arm,  # type: ignore[arg-type]
             ),
             "after": run_system(
                 directory,
                 bundle=bundle,
-                duplicates=after_config,
                 measure_calibration_quality=False,
+                **after_arm,  # type: ignore[arg-type]
             ),
         }
         difficulty = pair["after"].manifest.difficulty.value

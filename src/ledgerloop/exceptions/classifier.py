@@ -684,10 +684,17 @@ def classify_exceptions(
                 # Present only for a re-posting the duplicate pass identified,
                 # where the ordering IS the evidence and there may be no shared
                 # reference to cite. `prose_for` branches on exactly that.
+                # Present for a re-posting (the ordering IS the evidence) and
+                # for a split tranche (so the prose addresses a credit rather
+                # than a settlement). `prose_for` branches on exactly that.
                 day_gap=(
                     (credit.credit.value_date - credit.reposting_of.value_date).days
                     if credit.reposting_of is not None
-                    else None
+                    else (
+                        0
+                        if exception_class is ExceptionClass.SPLIT_PAYOUT_INCOMPLETE
+                        else None
+                    )
                 ),
             )
         )

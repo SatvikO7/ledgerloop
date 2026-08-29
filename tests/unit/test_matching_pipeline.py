@@ -384,20 +384,24 @@ class TestAgainstAGeneratedSplit:
     def test_recall_is_reported_honestly_and_is_still_short_of_the_target(
         self, split_scored
     ):
-        """Five tiers reach most of the links, and the rest is recorded as missed.
+        """Five tiers reach nearly every link, and the rest is recorded as missed.
 
         Phase 2.3 moved this from 0.4422 to 0.8435 by de-duplicating the
-        statement before the ladder ran; what remains is the split payouts T2
-        cannot partition uniquely and one genuinely ambiguous subset -- refusals
-        rather than failures to look. A step that quietly optimised recall would
-        have to give up precision to do it, and the precision column says it did
-        not: still exactly 1.0, still zero false positives.
+        statement before the ladder ran, and Phase 2.5 to 0.9626 by completing
+        the split payouts whose tranches had lost their reference. What remains
+        is **one** settlement whose payments do not partition uniquely across
+        its two tranches -- a refusal rather than a failure to look.
+
+        A step that quietly optimised recall would have to give up precision to
+        do it, and the precision column says it did not: still exactly 1.0,
+        still zero false positives, across every one of those changes.
         """
         _, _, metrics = split_scored
         links = metrics.link_metrics
         assert links is not None
-        assert 0.80 < links.recall < 0.90
+        assert 0.95 < links.recall < 1.0
         assert links.precision == 1.0
+        assert links.false_positives == 0
 
 
 class TestTheResidualLoop:

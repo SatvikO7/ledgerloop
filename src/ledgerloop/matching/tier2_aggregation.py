@@ -69,9 +69,10 @@ can never end up half-explained with its remaining payments silently dropped.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from ledgerloop.config import MatchingTolerances
+from ledgerloop.config import LexicalMatching, MatchingTolerances
 from ledgerloop.matching.bank_leg import attribute_clawback, candidate_id
 from ledgerloop.matching.context import MatchContext, SettlementView
 from ledgerloop.matching.subset_sum import (
@@ -80,6 +81,7 @@ from ledgerloop.matching.subset_sum import (
     SubsetSolution,
     find_subsets,
 )
+from ledgerloop.matching.tier3_lexical import MerchantProfile, score_names
 from ledgerloop.models.candidates import Evidence, FeatureVector, MatchCandidate
 from ledgerloop.models.enums import EvidenceKind, LinkType, Tier
 from ledgerloop.models.records import CanonicalBankTxn, CanonicalPayment
@@ -99,7 +101,10 @@ __all__ = [
     "credit_bucket",
     "expected_credit_minor",
     "features_for",
+    "find_tranche_set",
+    "lexical_credit_bucket",
     "payment_bucket",
+    "run_split_completion",
     "run_tier2",
     "search_window",
 ]
@@ -489,7 +494,28 @@ def _solve(
 ) -> _Attempt:
     """Assign every credit a subset, or explain why it could not be done."""
     epsilon = tolerances.aggregation_epsilon_minor
-    gross = view.payment_gross_minor
+    # **The denominator is the bucket, not the batch.** `payments` is what
+    # `payment_bucket` decided actually travelled -- the nested payments minus
+    # any a negative adjustment identifies as charged back, whose money never
+    # reached the bank. Allocating the net across *all* nested payments while
+    # partitioning only the ones that arrived puts a payment in the denominator
+    # that is in no tranche, and every tranche then comes out short by its
+    # share of money that was never paid.
+    #
+    # Found in Phase 2.5, on A08 composed with A09: SETL-0004 on `test` seed 42
+    # expects Rs 2,02,486.64 for its larger tranche and the batch-gross
+    # denominator predicted Rs 1,83,195.85 -- out by Rs 19,290.79, far outside
+    # any epsilon, so the batch was refused. With the bucket's gross the
+    # prediction is exact on every tranche of every case, delta = 0.
+    #
+    # For a batch with no claw-back the two are equal, so this is a correction
+    # to a composed case and not a change of policy. `run_tier2`'s behaviour on
+    # every corpus in this project is unchanged by it, which is measured rather
+    # than assumed -- see `.local/steps/phase-2-5.md` section 5.
+    gross = sum_minor(
+        (payment.amount_minor for payment in payments),
+        field=f"{view.settlement_id}.bucket_gross",
+    )
     net = view.net_minor
     attempt = _Attempt(assignments=[])
     remaining = list(payments)
@@ -586,7 +612,10 @@ def run_tier2(context: MatchContext, tolerances: MatchingTolerances) -> Aggregat
             continue
 
         payments = payment_bucket(view, context)
-        gross = view.payment_gross_minor
+        gross = sum_minor(
+            (payment.amount_minor for payment in payments),
+            field=f"{view.settlement_id}.bucket_gross",
+        )
         if not payments or gross <= 0 or view.net_minor <= 0:
             continue
 
@@ -692,5 +721,282 @@ def run_tier2(context: MatchContext, tolerances: MatchingTolerances) -> Aggregat
         payments_matched=payments_matched,
         subsets_examined=examined,
         greedy_fallbacks=greedy,
+        timeouts=timeouts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Split completion (Phase 2.5) -- T2 reaching a split payout with no reference
+#
+# `run_tier2` finds tranches through the settlement's key. When A09 composes
+# with A07 and every tranche loses its narration reference, `credit_bucket`
+# returns nothing, T2 never sees the batch, and no later tier can help: T3
+# matches ONE credit against the WHOLE net, and a tranche is by definition not
+# the whole net. The batch falls through the ladder entirely.
+#
+# What follows supplies the tranche set from T3's merchant evidence and then
+# runs `_solve` -- T2's own partition machinery, unchanged and uncopied -- over
+# it. Everything below this line is candidate *generation*; not one line of the
+# arithmetic, the uniqueness rule or the conservation check is duplicated.
+# ---------------------------------------------------------------------------
+
+
+def lexical_credit_bucket(
+    view: SettlementView,
+    context: MatchContext,
+    lexical: LexicalMatching,
+    profiles: Mapping[str, MerchantProfile],
+) -> tuple[CanonicalBankTxn, ...]:
+    """Unreferenced credits that could be a tranche of this settlement's payout.
+
+    The same three tests T3 applies to a whole-batch candidate, minus the one
+    that cannot hold for a tranche:
+
+    * **no reference of its own.** A credit publishing some *other* settlement's
+      UTR is already explained and its amount agreeing is a coincidence; one
+      publishing *this* settlement's is T2's business through the keyed path.
+      Only the rows A07 stripped can compete here -- which is exactly where the
+      case this pass exists for lives.
+    * **the merchant the batch belongs to**, scored against the master T3
+      derived from the statement's own keyed narrations. No new gate: the
+      configured :attr:`LexicalMatching.min_score`.
+    * **inside T3's date window** of the settlement date.
+
+    What is deliberately *not* applied is T3's amount test. T3 requires a
+    candidate to be within tolerance of the **whole net**, and a tranche never
+    is -- that single filter is why the composed A09+A07 case is invisible to
+    every existing tier.
+
+    Largest first, then ``txn_id``: a total order, so the run is reproducible
+    and the subset search enumerates identically every time.
+    """
+    merchant = context.merchant_of(view)
+    if merchant is None:
+        return ()
+    profile = profiles.get(merchant)
+    if profile is None or not profile.spellings:
+        return ()
+
+    picked: list[CanonicalBankTxn] = []
+    for txn in context.open_credits():
+        if txn.extracted_utr is not None or txn.extracted_merchant is None:
+            continue
+        best = max(score_names(txn.extracted_merchant, s) for s in profile.spellings)
+        if best < lexical.min_score:
+            continue
+        gap = (txn.value_date - view.settlement.settled_on).days
+        if abs(gap) > lexical.date_window_days:
+            continue
+        picked.append(txn)
+    return tuple(sorted(picked, key=lambda txn: (-txn.credit_minor, txn.txn_id)))
+
+
+def find_tranche_set(
+    view: SettlementView,
+    credits: tuple[CanonicalBankTxn, ...],
+    tolerances: MatchingTolerances,
+) -> tuple[tuple[CanonicalBankTxn, ...] | None, SubsetSearch]:
+    """The one set of credits summing **exactly** to the net, or nothing.
+
+    Three refusals, and each is the reason the pass can be trusted rather than a
+    tuning choice:
+
+    * **Exact, not banded.** The target window is ``[net, net]``. A split payout
+      conserves money by construction -- the tranches *are* the payout -- so a
+      tolerance here would not absorb rounding drift, it would admit sets that
+      are merely close, and "close" over a pool of similar amounts is where
+      false positives live. T2's ``epsilon`` still governs the *partition*
+      below, where per-payment rounding genuinely accumulates.
+    * **At least two credits.** A single credit equal to the whole net is a
+      one-to-one match and belongs to T0/T1/T3. This pass must not re-litigate
+      one, and a "split" of one tranche is not a split.
+    * **Exhaustively unique.** ``SubsetSearch.is_unique`` is
+      ``exhaustive and len(solutions) == 1``. A greedy fallback on a pool too
+      wide to enumerate can find a set but can never prove it is alone, so it
+      is refused -- the same distinction T2 already draws.
+    """
+    if len(credits) < 2:
+        return None, SubsetSearch(solutions=(), exhaustive=True, method="meet_in_the_middle")
+
+    search = find_subsets(
+        [txn.credit_minor for txn in credits],
+        view.net_minor,
+        view.net_minor,
+        want=2,
+        max_exact_items=tolerances.max_subset_size,
+        timeout_ms=tolerances.subset_solver_timeout_ms,
+        accept=_at_least_two_members,
+    )
+    if not search.is_unique:
+        return None, search
+    solution = search.solutions[0]
+    return tuple(credits[index] for index in solution.indices), search
+
+
+def _at_least_two_members(indices: tuple[int, ...], total: int) -> bool:
+    """A one-credit "split" is a whole-batch match. Refused here, not counted."""
+    del total
+    return len(indices) >= 2
+
+
+def _tranche_set_evidence(
+    view: SettlementView,
+    credits: tuple[CanonicalBankTxn, ...],
+    search: SubsetSearch,
+) -> Evidence:
+    members = ", ".join(
+        f"{txn.txn_id} {format_minor(txn.credit_minor)}" for txn in credits
+    )
+    return Evidence(
+        kind=EvidenceKind.SUBSET_SUM,
+        detail=(
+            f"{len(credits)} unreferenced credit(s) ({members}) sum exactly to "
+            f"{format_minor(view.net_minor)}, the net {view.settlement_id} "
+            f"declares -- and no other subset of the {search.examined} "
+            f"combination(s) examined reaches it, so the payout was split "
+            f"across these rows and no others"
+        ),
+        refs=(
+            settlement_ref(view.settlement_id),
+            *(bank_ref(txn.txn_id) for txn in credits),
+        ),
+        amount_minor=view.net_minor,
+    )
+
+
+def _lexical_grounding_evidence(
+    view: SettlementView,
+    credits: tuple[CanonicalBankTxn, ...],
+    profile: MerchantProfile,
+) -> Evidence:
+    names = ", ".join(sorted({txn.extracted_merchant or "" for txn in credits}))
+    return Evidence(
+        kind=EvidenceKind.LEXICAL_SIMILARITY,
+        detail=(
+            f"none of these rows carries a reference (A07 stripped it); they "
+            f"name {names!r}, which the statement's own keyed credits use for "
+            f"the merchant behind {view.settlement_id} "
+            f"({profile.witnesses} spelling(s) on file)"
+        ),
+        refs=tuple(bank_ref(txn.txn_id) for txn in credits),
+    )
+
+
+def run_split_completion(
+    context: MatchContext,
+    tolerances: MatchingTolerances,
+    lexical: LexicalMatching,
+    profiles: Mapping[str, MerchantProfile],
+) -> AggregationOutcome:
+    """Reach the split payouts whose tranches lost their reference.
+
+    Runs over settlements **still in the pool** after T2 and T3 have had their
+    pass, and only over those with no keyed credit -- a settlement T2 could see
+    through its UTR has already been ruled on, and re-litigating it here would
+    let a looser candidate rule overturn a stricter tier's refusal.
+
+    The result is a :class:`AggregationOutcome` carrying ``T2_AGGREGATION``
+    candidates, because that is what they are: ``subset_members`` is a
+    type-level invariant of T2 (``MatchCandidate`` refuses them on any other
+    tier), and every figure in them is produced by T2's own code.
+
+    **The pass needs T2 and T3 both enabled**, and the pipeline gates it on
+    exactly that. So the published ``T0-T2`` ablation row is unchanged -- with
+    T3 off there is no merchant master and no pool -- and the contribution lands
+    on ``T0-T3``, which is the honest place for a result that needs both.
+    """
+    epsilon = tolerances.aggregation_epsilon_minor
+    candidates: list[MatchCandidate] = []
+    seen = resolved = ambiguous = unsolved = no_pool = 0
+    credits_matched = payments_matched = examined = timeouts = 0
+
+    for view in list(context.open_settlements()):
+        if context.open_credits_for(view.utr or ""):
+            continue  # keyed: T2's, through the path it already has
+        payments = payment_bucket(view, context)
+        if not payments or view.payment_gross_minor <= 0 or view.net_minor <= 0:
+            continue
+
+        pool = lexical_credit_bucket(view, context, lexical, profiles)
+        if len(pool) < 2:
+            no_pool += 1
+            continue
+
+        seen += 1
+        tranches, search = find_tranche_set(view, pool, tolerances)
+        examined += search.examined
+        if search.timed_out:
+            timeouts += 1
+            unsolved += 1
+            continue
+        if tranches is None:
+            # Either nothing sums to the net, or more than one set does. Both
+            # are refusals and neither is asserted: the settlement stays in the
+            # pool and the exception queue reports it as it did before.
+            unsolved += 1
+            continue
+
+        # --- from here down it is T2, unchanged --------------------------
+        attempt = _solve(view, payments, tranches, tolerances)
+        examined += attempt.examined
+        if attempt.timed_out:
+            timeouts += 1
+            unsolved += 1
+            continue
+        if attempt.ambiguity is not None or attempt.unproven is not None:
+            # The tranche set is right but the payments do not partition
+            # uniquely across it. Refused for the same reason T2 refuses: two
+            # partitions fitting is a coin flip, not an answer.
+            ambiguous += 1
+            continue
+        if attempt.failed or not attempt.assignments:
+            unsolved += 1
+            continue
+
+        merchant = context.merchant_of(view)
+        profile = profiles[merchant] if merchant is not None else None
+        grounding: tuple[Evidence, ...] = (
+            _tranche_set_evidence(view, tranches, search),
+        )
+        if profile is not None:
+            grounding += (_lexical_grounding_evidence(view, tranches, profile),)
+        conservation = _conservation_evidence(view, tuple(attempt.assignments))
+
+        for assignment in attempt.assignments:
+            candidates.append(
+                _settlement_candidate(
+                    view,
+                    assignment,
+                    probability=1.0,
+                    verified=True,
+                    epsilon=epsilon,
+                    extra=(conservation, *grounding),
+                )
+            )
+            candidates.extend(
+                _payment_candidates(
+                    view,
+                    assignment,
+                    probability=1.0,
+                    verified=True,
+                    epsilon=epsilon,
+                    extra=(conservation, *grounding),
+                )
+            )
+            payments_matched += len(assignment.payments)
+        credits_matched += len(attempt.assignments)
+        context.consume(view.settlement_id, [a.credit.txn_id for a in attempt.assignments])
+        resolved += 1
+
+    return AggregationOutcome(
+        candidates=tuple(candidates),
+        settlements_seen=seen,
+        settlements_resolved=resolved,
+        settlements_ambiguous=ambiguous,
+        settlements_unsolved=unsolved,
+        settlements_without_key=no_pool,
+        credits_matched=credits_matched,
+        payments_matched=payments_matched,
+        subsets_examined=examined,
         timeouts=timeouts,
     )

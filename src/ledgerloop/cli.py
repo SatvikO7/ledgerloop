@@ -62,7 +62,7 @@ from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
 from ledgerloop.eval.ablation import ABLATION_LADDERS, AblationArtifact, run_ablation
 from ledgerloop.eval.artifacts import ComparisonArtifact, LLMReportArtifact
 from ledgerloop.eval.baselines import run_b0, run_b1
-from ledgerloop.eval.comparison import run_comparison
+from ledgerloop.eval.comparison import COMPARABLE, run_comparison
 from ledgerloop.eval.harness import (
     StaleCalibrationError,
     SystemRun,
@@ -524,6 +524,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="a bundle written by `ledgerloop calibrate`, applied to both arms",
+    )
+    comparison.add_argument(
+        "--switch",
+        default="split-completion",
+        choices=sorted(COMPARABLE),
+        help="which change to compare (default split-completion, the most "
+        "recent). Exactly one RunConfig field differs between the arms.",
     )
     comparison.add_argument(
         "--out",
@@ -1201,11 +1208,11 @@ def _generate_if_absent(
 def _run_comparison(args: argparse.Namespace) -> int:
     """Both arms of the Phase 2.3 change, over the same corpora.
 
-    The switch under test is `RunConfig.duplicates.enabled` and nothing else. It
-    is not a CLI flag here on purpose: a comparison whose arms the caller could
-    define would be a comparison whose meaning changed with the invocation, and
+    ``--switch`` picks which change, from a fixed list -- not an arbitrary
+    configuration the caller supplies. A comparison whose arms the caller could
+    define freely would be one whose meaning changed with the invocation, and
     the artefact would then have to be read alongside the command line that
-    produced it.
+    produced it. The artefact names the change it measured instead.
     """
     directories: list[Path] = list(args.data)
     try:
@@ -1215,7 +1222,7 @@ def _run_comparison(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        artifact = run_comparison(directories, bundle=bundle)
+        artifact = run_comparison(directories, bundle=bundle, switch=args.switch)
     except ValueError as exc:
         print(f"comparison refused: {exc}", file=sys.stderr)
         return 1

@@ -54,7 +54,11 @@ from ledgerloop.matching.context import MatchContext
 from ledgerloop.matching.policy import decide_all
 from ledgerloop.matching.tier0_exact import OrderLegOutcome, run_tier0
 from ledgerloop.matching.tier1_tolerance import run_tier1
-from ledgerloop.matching.tier2_aggregation import AggregationOutcome, run_tier2
+from ledgerloop.matching.tier2_aggregation import (
+    AggregationOutcome,
+    run_split_completion,
+    run_tier2,
+)
 from ledgerloop.matching.tier3_lexical import LexicalOutcome, build_profiles, run_tier3
 from ledgerloop.matching.tier4_graph import GraphOutcome, run_tier4
 from ledgerloop.models.candidates import MatchCandidate
@@ -73,6 +77,7 @@ __all__ = [
     "ResidualAdjudicator",
     "adjudicate_residual",
     "close_ladder",
+    "complete_splits",
     "ladder_description",
     "ladder_name",
     "open_ladder",
@@ -179,6 +184,8 @@ class MatchRun:
     order_leg: OrderLegOutcome
     bank_legs: tuple[BankLegOutcome, ...] = field(default=())
     aggregation: AggregationOutcome = field(default_factory=AggregationOutcome)
+    split_completion: AggregationOutcome = field(default_factory=AggregationOutcome)
+    """The split-completion pass's own counters. See ``LadderRun``."""
     lexical: LexicalOutcome = field(default_factory=LexicalOutcome)
     graph: GraphOutcome = field(default_factory=GraphOutcome)
     passes: int = 1
@@ -443,6 +450,12 @@ class LadderRun:
     t1_bank: BankLegOutcome
 
     aggregation: AggregationOutcome = field(default_factory=AggregationOutcome)
+    split_completion: AggregationOutcome = field(default_factory=AggregationOutcome)
+    """What the Phase 2.5 split-completion pass contributed, on its own.
+
+    Merged into :attr:`aggregation` as well, because it *is* T2 -- this is the
+    separate view, so the report can say how often the pass fired without
+    implying a seventh tier."""
     lexical: LexicalOutcome = field(default_factory=LexicalOutcome)
     graph: GraphOutcome = field(default_factory=GraphOutcome)
     residual: list[MatchCandidate] = field(default_factory=list)
@@ -706,6 +719,7 @@ def close_ladder(run: LadderRun) -> MatchRun:
         order_leg=run.order_leg,
         bank_legs=bank_legs,
         aggregation=run.aggregation,
+        split_completion=run.split_completion,
         lexical=run.lexical,
         graph=run.graph,
         passes=run.passes,
@@ -731,6 +745,51 @@ def close_ladder(run: LadderRun) -> MatchRun:
         settlements_unresolved=len(context.settlements)
         - len(context.consumed_settlements),
     )
+
+
+def complete_splits(run: LadderRun) -> LadderRun:
+    """Stage 2b: the split payouts nothing in the residual loop could reach.
+
+    **After** the loop has converged, and that ordering is the whole design.
+    Inside the loop this pass would be racing tiers that are still consuming:
+    every credit T2 or T3 has yet to claim is still in the candidate pool, so
+    more subsets reach the net, the uniqueness test fails, and the pass refuses
+    a batch it could have resolved once the pool settled. Measured on `test`
+    seed 42: one settlement resolved from inside the loop against three from
+    after it, with the other two refused for ambiguity that later evaporated.
+
+    Running it once, at the end, over a pool nothing else will touch again is
+    both more effective and easier to reason about -- and it keeps the pass out
+    of the loop's convergence condition, so the ladder still terminates on the
+    same rule it always did.
+
+    Gated on T2 **and** T3 both being enabled, because it needs T3's merchant
+    master to build a pool and T2's solver to partition it. That gate is also
+    what leaves the published `T0-T2` ablation row untouched: the contribution
+    lands on `T0-T3`, which is where a result needing both tiers belongs.
+    """
+    enabled = run.enabled
+    if not (2 in enabled and 3 in enabled and run.config.split_completion.enabled):
+        return run
+
+    started = time.perf_counter_ns()
+    outcome = run_split_completion(
+        run.context,
+        run.config.tolerances,
+        run.config.lexical,
+        run.profiles,  # type: ignore[arg-type]
+    )
+    run._add(Tier.T2_AGGREGATION, time.perf_counter_ns() - started)
+
+    if run.bundle is not None:
+        apply_bundle(outcome.candidates, run.bundle)
+    run.residual.extend(outcome.candidates)
+    # Merged into T2's counters because it *is* T2 doing T2's arithmetic; kept
+    # separately as well so the report can say how often the pass fired without
+    # implying a seventh tier.
+    run.aggregation = _merge_aggregation(run.aggregation, outcome)
+    run.split_completion = _merge_aggregation(run.split_completion, outcome)
+    return run
 
 
 def run_matching(
@@ -775,5 +834,6 @@ def run_matching(
     run = open_ladder(ingest, config, bundle=bundle, decided_at=decided_at)
     while should_run_residual_pass(run):
         run_residual_pass(run)
+    complete_splits(run)
     adjudicate_residual(run, adjudicator)
     return close_ladder(run)

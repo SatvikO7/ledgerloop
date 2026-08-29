@@ -28,7 +28,7 @@ the false-positive cost column is that argument in rupees.
 | B0 | `test` | 330 † | 330 | 59.09% | 66.33% | 65.80% | 135 | ₹34,98,306.00 | n/a |
 | B1 | `test` | 396 † | 396 | 65.40% | 88.10% | 86.67% | 137 | ₹35,37,867.00 | n/a |
 | B2 § | `dev` ‡ | 60 † | 60 | 70.00% | 71.19% | 97.06% | 18 | ₹4,32,588.00 | n/a |
-| B3 (`T0-T4`) | `test` | 248 | 248 | 100.00% | 84.35% | 79.71% | 0 | ₹0.00 | 100.00% |
+| B3 (`T0-T4`) | `test` | 283 | 283 | 100.00% | 96.26% | 91.59% | 0 | ₹0.00 | 100.00% |
 
 † A baseline has no proposal stage separate from its output: every link it
 finds, it asserts. Yield and conviction coincide because there is no decision
@@ -75,16 +75,16 @@ counters would describe an arithmetic identity rather than a system.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `T0` | 1.0000 ± 0.0000 | 0.3489 ± 0.0206 | 0.3302 ± 0.0263 | +0.3489 | 102.8 ± 6.5 | 102.8 ± 6.5 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
 | `T0-T1` | 1.0000 ± 0.0000 | 0.5123 ± 0.1019 | 0.4855 ± 0.1072 | +0.1634 | 151.0 ± 30.8 | 151.0 ± 30.8 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
-| `T0-T2` | 1.0000 ± 0.0000 | 0.6625 ± 0.0565 | 0.6354 ± 0.0603 | +0.1502 | 195.2 ± 17.2 | 195.2 ± 17.2 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
-| `T0-T3` | 1.0000 ± 0.0000 | 0.8049 ± 0.0792 | 0.7711 ± 0.0861 | +0.1424 | 237.2 ± 24.5 | 237.2 ± 24.5 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
-| `T0-T4` | 1.0000 ± 0.0000 | 0.8049 ± 0.0792 | 0.7711 ± 0.0861 | +0.0000 | 237.2 ± 24.5 | 237.2 ± 24.5 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
-| `T0-T5` | 1.0000 ± 0.0000 | 0.8049 ± 0.0792 | 0.7711 ± 0.0861 | +0.0000 | 237.2 ± 24.5 | 237.2 ± 24.5 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
+| `T0-T2` | 1.0000 ± 0.0000 | 0.6972 ± 0.0700 | 0.6723 ± 0.0718 | +0.1849 | 205.4 ± 20.7 | 205.4 ± 20.7 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
+| `T0-T3` | 1.0000 ± 0.0000 | 0.8844 ± 0.0788 | 0.8533 ± 0.0810 | +0.1872 | 260.6 ± 24.2 | 260.6 ± 24.2 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
+| `T0-T4` | 1.0000 ± 0.0000 | 0.8844 ± 0.0788 | 0.8533 ± 0.0810 | +0.0000 | 260.6 ± 24.2 | 260.6 ± 24.2 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
+| `T0-T5` | 1.0000 ± 0.0000 | 0.8844 ± 0.0788 | 0.8533 ± 0.0810 | +0.0000 | 260.6 ± 24.2 | 260.6 ± 24.2 | 0.0 ± 0.0 | ₹0.00 | 0.0 ± 0.0 | 0 ± 0 | 0.00 |
 
 `Δ recall` is this row's mean recall minus the row above it: what the tier
 added over the ladder without it. The first row is measured against doing
 nothing.
 
-Every row ran tuning configuration `5e092859b07f29f4`: the same
+Every row ran tuning configuration `024539384d11b17f`: the same
 tolerances, lexical gates, graph parameters, thresholds, severity bands and
 resolution bounds. The hash excludes the ladder, which the row label already
 states, and the corpus, which varies by seed on purpose -- so one value
@@ -110,12 +110,12 @@ first of these seeds, and they are labelled as single-seed where they appear.
 | Metric | Mean ± std | Min | Max |
 |---|---|---|---|
 | Auto-match precision | 1.0000 ± 0.0000 | 1.0000 | 1.0000 |
-| Link recall | 0.8049 ± 0.0792 | 0.7288 | 0.9226 |
-| F1 | 0.8902 ± 0.0477 | 0.8431 | 0.9597 |
-| Match rate | 0.7711 ± 0.0861 | 0.6977 | 0.9069 |
+| Link recall | 0.8844 ± 0.0788 | 0.7864 | 0.9626 |
+| F1 | 0.9371 ± 0.0449 | 0.8805 | 0.9809 |
+| Match rate | 0.8533 ± 0.0810 | 0.7649 | 0.9369 |
 | Exception recall | 0.9818 ± 0.0250 | 0.9524 | 1.0000 |
-| Candidate yield | 237.2 ± 24.5 | 215.0 | 274.0 |
-| Auto-matched links | 237.2 ± 24.5 | 215.0 | 274.0 |
+| Candidate yield | 260.6 ± 24.2 | 232.0 | 283.0 |
+| Auto-matched links | 260.6 ± 24.2 | 232.0 | 283.0 |
 | False positives | 0.00 ± 0.00 | 0.00 | 0.00 |
 | Unmatchable records | 67.6 ± 2.3 | 64.0 | 70.0 |
 | False-positive cost | ₹0.00 | ₹0.00 | ₹0.00 |
@@ -124,7 +124,7 @@ Standard deviation is the **sample** deviation (`ddof = 1`): five seeds are a
 sample of the generator's distribution, not the population of every corpus it
 can produce. A single observation reports no spread rather than a spread of zero.
 
-Every seed ran tuning configuration `5e092859b07f29f4` -- every threshold,
+Every seed ran tuning configuration `024539384d11b17f` -- every threshold,
 tolerance and gate, with the corpus identity excluded. One hash across all
 the rows is what says the spread above is corpus variance and not
 configuration drift.
@@ -139,12 +139,12 @@ comparable to each other.
 | Metric | `easy` | `standard` | `hard` |
 |---|---|---|---|
 | Auto-match precision | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 |
-| Link recall | 0.8776 ± 0.0363 | 0.8049 ± 0.0792 | 0.7414 ± 0.1048 |
-| F1 | 0.9345 ± 0.0207 | 0.8902 ± 0.0477 | 0.8482 ± 0.0680 |
-| Match rate | 0.8571 ± 0.0389 | 0.7711 ± 0.0861 | 0.7063 ± 0.1020 |
+| Link recall | 0.9067 ± 0.0398 | 0.8844 ± 0.0788 | 0.8624 ± 0.0702 |
+| F1 | 0.9507 ± 0.0221 | 0.9371 ± 0.0449 | 0.9249 ± 0.0401 |
+| Match rate | 0.8886 ± 0.0430 | 0.8533 ± 0.0810 | 0.8281 ± 0.0715 |
 | Exception recall | 0.9784 ± 0.0296 | 0.9818 ± 0.0250 | 0.9920 ± 0.0179 |
-| Candidate yield | 259.8 ± 11.8 | 237.2 ± 24.5 | 218.0 ± 31.2 |
-| Auto-matched links | 259.8 ± 11.8 | 237.2 ± 24.5 | 218.0 ± 31.2 |
+| Candidate yield | 268.4 ± 12.6 | 260.6 ± 24.2 | 253.6 ± 21.4 |
+| Auto-matched links | 268.4 ± 12.6 | 260.6 ± 24.2 | 253.6 ± 21.4 |
 | False positives | 0.00 ± 0.00 | 0.00 ± 0.00 | 0.00 ± 0.00 |
 | Unmatchable records | 63.0 ± 1.0 | 67.6 ± 2.3 | 70.0 ± 2.1 |
 | False-positive cost | ₹0.00 | ₹0.00 | ₹0.00 |
@@ -162,58 +162,63 @@ the match-rate row shows.
 No threshold, model or gate anywhere in this project was selected against a
 `test` result at any difficulty.
 
-## Before and after (Phase 2.3)
+## Before and after
 
-**What changed:** the duplicate-posting pass over the bank statement, before the tier ladder.
+**What changed:** split completion -- T2's arithmetic over a tranche set T3's merchant master supplies, for payouts whose every tranche lost its reference.
 
 Both arms ran over the **same** corpora -- `test`, seeds 42, 43, 44, 45, 46, three difficulties -- with the same fitted bundle and the same full
-ladder. The only field that differs is `RunConfig.duplicates.enabled`, and
-each arm's `tuning_hash` is printed so that claim is a check rather than a
-sentence. Deltas are differences of means over five seeds, not significance
-tests: five paired runs of a deterministic system are enough for a spread and
-not enough for an inference.
+ladder. **Exactly one `RunConfig` field differs between them**, and each arm's
+`tuning_hash` is printed below so that claim is a check rather than a sentence.
+Deltas are differences of means over five seeds, not significance tests: five
+paired runs of a deterministic system are enough for a spread and not enough
+for an inference.
+
+A change that is *not* switchable does not appear here. A correctness fix has
+no defensible second arm -- a flag for a bug is an invitation to run the buggy
+one -- so its effect is measured against the previous commit and reported per
+seed in the step notes instead.
 
 ### `easy` — 5 seeds
 
-| Metric | without the pass | with the pass | Δ |
+| Metric | without split completion | with split completion | Δ |
 |---|---|---|---|
 | precision | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 | +0.0000 |
-| recall | 0.8122 ± 0.0641 | 0.8776 ± 0.0363 | +0.0654 |
-| match rate | 0.7944 ± 0.0664 | 0.8571 ± 0.0389 | +0.0627 |
+| recall | 0.9006 ± 0.0335 | 0.9067 ± 0.0398 | +0.0061 |
+| match rate | 0.8820 ± 0.0357 | 0.8886 ± 0.0430 | +0.0066 |
 | exception recall | 0.9784 ± 0.0296 | 0.9784 ± 0.0296 | +0.0000 |
 | false positives | 0 ± 0 | 0 ± 0 | +0 |
 | false positive cost minor | 0 ± 0 | 0 ± 0 | +0 |
-| auto matched | 240 ± 19 | 260 ± 12 | +19 |
+| auto matched | 267 ± 11 | 268 ± 13 | +2 |
 
-Tuning hash: `ff775ec5f24826c5` → `5e092859b07f29f4`.
+Tuning hash: `e475f3b9063b2208` → `024539384d11b17f`.
 
 ### `standard` — 5 seeds
 
-| Metric | without the pass | with the pass | Δ |
+| Metric | without split completion | with split completion | Δ |
 |---|---|---|---|
 | precision | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 | +0.0000 |
-| recall | 0.5808 ± 0.1951 | 0.8049 ± 0.0792 | +0.2240 |
-| match rate | 0.5633 ± 0.1956 | 0.7711 ± 0.0861 | +0.2078 |
+| recall | 0.8396 ± 0.0720 | 0.8844 ± 0.0788 | +0.0448 |
+| match rate | 0.8080 ± 0.0788 | 0.8533 ± 0.0810 | +0.0454 |
 | exception recall | 0.9818 ± 0.0250 | 0.9818 ± 0.0250 | +0.0000 |
 | false positives | 0 ± 0 | 0 ± 0 | +0 |
 | false positive cost minor | 0 ± 0 | 0 ± 0 | +0 |
-| auto matched | 171 ± 59 | 237 ± 24 | +66 |
+| auto matched | 247 ± 22 | 261 ± 24 | +13 |
 
-Tuning hash: `ff775ec5f24826c5` → `5e092859b07f29f4`.
+Tuning hash: `e475f3b9063b2208` → `024539384d11b17f`.
 
 ### `hard` — 5 seeds
 
-| Metric | without the pass | with the pass | Δ |
+| Metric | without split completion | with split completion | Δ |
 |---|---|---|---|
 | precision | 1.0000 ± 0.0000 | 1.0000 ± 0.0000 | +0.0000 |
-| recall | 0.4446 ± 0.1156 | 0.7414 ± 0.1048 | +0.2967 |
-| match rate | 0.4314 ± 0.1091 | 0.7063 ± 0.1020 | +0.2749 |
+| recall | 0.7706 ± 0.0765 | 0.8624 ± 0.0702 | +0.0918 |
+| match rate | 0.7365 ± 0.0742 | 0.8281 ± 0.0715 | +0.0916 |
 | exception recall | 0.9920 ± 0.0179 | 0.9920 ± 0.0179 | +0.0000 |
 | false positives | 0 ± 0 | 0 ± 0 | +0 |
 | false positive cost minor | 0 ± 0 | 0 ± 0 | +0 |
-| auto matched | 131 ± 34 | 218 ± 31 | +87 |
+| auto matched | 227 ± 23 | 254 ± 21 | +27 |
 
-Tuning hash: `ff775ec5f24826c5` → `5e092859b07f29f4`.
+Tuning hash: `e475f3b9063b2208` → `024539384d11b17f`.
 
 ### What the comparison does and does not show
 
@@ -223,12 +228,13 @@ makes the recall column mean anything here: recall bought with a wrong
 auto-match is not an improvement in this project, and the
 false-positive column is where that would have shown up in rupees.
 
-The change is a **statement-hygiene pass**, not a loosened threshold: no
-tolerance, gate or threshold moved, and the pass's own two knobs can only
-be turned towards asserting *less* (`ledgerloop.matching.duplicates`).
-Switching it off reproduces every pre-Phase-2 number to the digit, which
+Neither change here is a loosened threshold. No tolerance, gate or
+threshold moved for either, and both passes' own knobs can only be turned
+towards asserting *less* -- the duplicate pass declines more as its window
+narrows, and split completion targets the net **exactly**, with no band at
+all. Switching either off reproduces its era's numbers to the digit, which
 `tests/unit/test_metrics_regression.py` asserts exactly rather than
-approximately.
+approximately, over three pinned arms.
 
 ## B2 -- the LLM-only baseline (PLAN.md §9.2)
 
@@ -307,13 +313,13 @@ sentence.
 |---|---|
 | Corpus | `test` seed 42, 742 records |
 | Live provider | no — offline stand-in |
-| Calls | 16 |
+| Calls | 15 |
 | Cache hits | 0 (0% of attempts) |
-| Calls per 100 records | 2.16 |
-| Prompt / completion tokens | 10842 / 9245 |
-| Provider latency | 16 ms |
+| Calls per 100 records | 2.02 |
+| Prompt / completion tokens | 9611 / 7933 |
+| Provider latency | 15 ms |
 | Actual spend | ₹0.00 |
-| Equivalent paid-API cost | ₹14.27 |
+| Equivalent paid-API cost | ₹12.32 |
 | Calls refused (budget / outage / schema) | 0 |
 | Schema failures retried | 0 |
 
@@ -322,10 +328,10 @@ sentence.
 | | |
 |---|---|
 | Narrations offered → accepted | 35 → 35 |
-| Link proposals returned → accepted | 4 → 0 |
+| Link proposals returned → accepted | 1 → 0 |
 | Refused: reference not in the evidence pack | 0 |
-| Demoted: money did not close under `verify_arithmetic` | 2 |
-| Exception prose rewritten | 74 |
+| Demoted: money did not close under `verify_arithmetic` | 1 |
+| Exception prose rewritten | 67 |
 
 A demoted proposal is **not dropped**: it becomes a candidate routed to a
 human, because "the model suggested this and the arithmetic disagrees" is
@@ -336,10 +342,10 @@ information a controller wants.
 | Metric | with the model | `--no-llm` |
 |---|---|---|
 | Precision | 1.0000 | 1.0000 |
-| Recall | 0.8435 | 0.8435 |
-| Match rate | 0.7971 | 0.7971 |
+| Recall | 0.9626 | 0.9626 |
+| Match rate | 0.9159 | 0.9159 |
 | Exception recall | 1.0000 | 1.0000 |
-| Auto-matched links | 248 | 248 |
+| Auto-matched links | 283 | 283 |
 | False positives | 0 | 0 |
 
 **Identical.** Removing the model moved no published figure, which is
@@ -373,12 +379,12 @@ and the same error.
 
 | Metric | Value (95% Wilson CI, n) | Target | Verdict |
 |---|---|---|---|
-| Auto-match precision | 1.0000 [0.9847, 1.0000] (n=248) | ≥ 99.00% | undecided at n=248 -- the interval straddles the target |
-| Link recall | 0.8435 [0.7976, 0.8806] (n=294) | -- | reported, not targeted |
-| Match rate | 0.7971 [0.7515, 0.8362] (n=345) | ≥ 85.00% | missed |
+| Auto-match precision | 1.0000 [0.9866, 1.0000] (n=283) | ≥ 99.00% | undecided at n=283 -- the interval straddles the target |
+| Link recall | 0.9626 [0.9343, 0.9790] (n=294) | -- | reported, not targeted |
+| Match rate | 0.9159 [0.8819, 0.9408] (n=345) | ≥ 85.00% | met |
 | Exception recall | 1.0000 [0.8865, 1.0000] (n=30) | ≥ 95.00% | undecided at n=30 -- the interval straddles the target |
 | Unmatchable coverage | 1.0000 [0.9011, 1.0000] (n=35) | -- | reported, not targeted |
-| Calibration | n/a — 1 populated bin over 102 residual links, so ECE measures the corpus, not the calibrator | -- | -- |
+| Calibration | n/a — 1 populated bin over 137 residual links, so ECE measures the corpus, not the calibrator | -- | -- |
 
 The interval is a Wilson score interval, not the normal approximation. At
 these sample sizes the normal approximation returns `[1.0, 1.0]` from a clean
@@ -388,14 +394,14 @@ run, claiming certainty this data cannot support.
 
 | | |
 |---|---|
-| True positives | 248 |
+| True positives | 283 |
 | False positives | 0 |
-| False negatives | 46 |
+| False negatives | 11 |
 | Precision | 100.00% |
-| Precision 95% CI (Wilson) | [0.9847, 1.0000] |
-| Recall | 84.35% |
-| Recall 95% CI (Wilson) | [0.7976, 0.8806] |
-| F1 | 0.9151 |
+| Precision 95% CI (Wilson) | [0.9866, 1.0000] |
+| Recall | 96.26% |
+| Recall 95% CI (Wilson) | [0.9343, 0.9790] |
+| F1 | 0.9809 |
 | **False-positive cost** | **₹0.00** |
 
 The interval is a Wilson score interval, not the normal approximation. At
@@ -414,8 +420,8 @@ would measure the corpus rather than the calibrator (`ARCHITECTURE.md` §6, 4).
 
 | | Asserted | Contenders |
 |---|---|---|
-| Links | 102 | 119 |
-| ...correct | 102 | 113 |
+| Links | 137 | 119 |
+| ...correct | 137 | 113 |
 | ECE | 0.0000 | 0.0504 |
 | Brier | 0.0000 | 0.0504 |
 | Populated bins | 1 of 10 | 1 of 10 |
@@ -444,7 +450,7 @@ measurement of the calibrator, not of the corpus.
 
 | Confidence bin | n | Mean p | Observed | Gap |
 |---|---|---|---|---|
-| `[0.9, 1.0)` | 102 | 1.0000 | 1.0000 | +0.0000 |
+| `[0.9, 1.0)` | 137 | 1.0000 | 1.0000 | +0.0000 |
 
 #### Reliability — every contender considered
 
@@ -458,7 +464,7 @@ measurement of the calibrator, not of the corpus.
 |---|---|---|---|---|
 | `T0_EXACT` | 395 | 395 | 395 | 0 |
 | `T1_TOLERANCE` | 49 | 49 | 49 | 0 |
-| `T2_AGGREGATION` | 45 | 44 | 44 | 0 |
+| `T2_AGGREGATION` | 86 | 85 | 85 | 0 |
 | `T3_FUZZY` | 70 | 70 | 70 | 0 |
 | `T4_GRAPH` | 0 | 0 | 0 | 0 |
 
@@ -473,13 +479,13 @@ Candidates include the structural `ORDER_PAID_BY` and intermediate
 
 ### The exception queue (PLAN.md §8)
 
-74 exceptions covering ₹65,09,124.90, sorted by rupee
+67 exceptions covering ₹50,20,195.68, sorted by rupee
 impact descending. Every row carries a class, a severity, a money figure, an
 evidence chain pointing back at source records, a root cause and an action.
 
 | | |
 |---|---|
-| Exceptions raised | 74 |
+| Exceptions raised | 67 |
 | Records ground truth calls exceptions | 30 |
 | ...covered by the queue | 30 |
 | **Exception recall** | **100.00%** |
@@ -495,7 +501,7 @@ could have resolved. Outgoing rows are money leaving the account rather
 than a payout being reconciled, so they are outside the unit entirely and
 the count is printed rather than the rows being dropped quietly.
 
-#### Highest impact (10 of 74)
+#### Highest impact (10 of 67)
 
 | Severity | Impact | Class | Subject | Confidence | Agent |
 |---|---|---|---|---|---|
@@ -503,12 +509,12 @@ the count is printed rather than the rows being dropped quietly.
 | CRITICAL | ₹4,69,758.73 | `E_DUPLICATE_CREDIT` | `BNK-00100` | 1.00 | bounded |
 | CRITICAL | ₹4,31,388.14 | `E_DUPLICATE_CREDIT` | `BNK-00092` | 1.00 | bounded |
 | CRITICAL | ₹4,17,977.97 | `E_DUPLICATE_CREDIT` | `BNK-00105` | 1.00 | bounded |
-| CRITICAL | ₹3,57,936.75 | `E_CHARGEBACK_NETTED` | `SETL-0018` | 1.00 | proposal only |
 | CRITICAL | ₹2,89,210.81 | `E_DUPLICATE_CREDIT` | `BNK-00106` | 1.00 | bounded |
-| CRITICAL | ₹2,74,273.91 | `E_CHARGEBACK_NETTED` | `SETL-0004` | 1.00 | proposal only |
 | CRITICAL | ₹2,29,335.85 | `E_DUPLICATE_CREDIT` | `BNK-00091` | 1.00 | bounded |
 | CRITICAL | ₹2,24,669.29 | `E_DUPLICATE_CREDIT` | `BNK-00101` | 1.00 | bounded |
-| CRITICAL | ₹2,13,763.57 | `E_ORPHAN_BANK_CREDIT` | `BNK-00098` | 0.75 | proposal only |
+| CRITICAL | ₹1,71,336.23 | `E_UNKNOWN_RESIDUAL` | `SETL-0001` | 0.30 | proposal only |
+| CRITICAL | ₹1,69,987.04 | `E_DUPLICATE_CREDIT` | `BNK-00113` | 1.00 | bounded |
+| CRITICAL | ₹1,25,506.80 | `E_DUPLICATE_CREDIT` | `BNK-00109` | 1.00 | bounded |
 
 The top row in full, because a table cell cannot carry an evidence chain:
 
@@ -528,29 +534,28 @@ The top row in full, because a table cell cannot carry an evidence chain:
 | Class | Count | Impact |
 |---|---|---|
 | `E_FEE_TAX_MISMATCH` | 5 | ₹652.00 |
-| `E_DUPLICATE_CREDIT` | 12 | ₹31,32,321.45 |
-| `E_POST_SETTLEMENT_REFUND` | 9 | ₹3,87,631.45 |
-| `E_MISSING_REFERENCE` | 2 | ₹1,40,336.45 |
-| `E_CHARGEBACK_NETTED` | 6 | ₹7,09,601.66 |
-| `E_ORPHAN_BANK_CREDIT` | 4 | ₹6,32,210.66 |
+| `E_DUPLICATE_CREDIT` | 10 | ₹29,60,985.22 |
+| `E_POST_SETTLEMENT_REFUND` | 8 | ₹2,47,295.00 |
+| `E_CHARGEBACK_NETTED` | 6 | ₹1,33,556.00 |
+| `E_SPLIT_PAYOUT_INCOMPLETE` | 2 | ₹1,71,336.23 |
 | `E_UNMATCHABLE` | 35 | ₹13,35,035.00 |
 | `E_UNKNOWN_RESIDUAL` | 1 | ₹1,71,336.23 |
 
 #### Anomaly → exception confusion
 
-| True anomaly | `E_CHARGEBACK_NETTED` | `E_DUPLICATE_CREDIT` | `E_FEE_TAX_MISMATCH` | `E_MISSING_REFERENCE` | `E_ORPHAN_BANK_CREDIT` | `E_POST_SETTLEMENT_REFUND` | `E_UNKNOWN_RESIDUAL` | `E_UNMATCHABLE` |
-|---|---|---|---|---|---|---|---|---|
-| `A01_CLEAN` | 6 | 9 | 5 | 0 | 0 | 9 | 1 | 26 |
-| `A02_ROUNDING_DRIFT` | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `A03_FEE_TAX_MISMATCH` | 0 | 3 | 5 | 0 | 0 | 1 | 1 | 0 |
-| `A04_TIMING_SHIFT` | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `A05_DUPLICATE_CREDIT` | 0 | 10 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `A06_POST_SETTLEMENT_REFUND` | 1 | 0 | 1 | 0 | 0 | 9 | 1 | 0 |
-| `A07_MISSING_REFERENCE` | 0 | 3 | 0 | 1 | 2 | 0 | 0 | 0 |
-| `A08_CHARGEBACK_NETTED` | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| `A09_SPLIT_PAYOUT` | 0 | 2 | 0 | 1 | 2 | 0 | 1 | 0 |
-| `A10_ORPHAN_BANK_CREDIT` | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
-| `A12_LATE_ARRIVAL` | 0 | 2 | 0 | 0 | 0 | 1 | 0 | 0 |
+| True anomaly | `E_CHARGEBACK_NETTED` | `E_DUPLICATE_CREDIT` | `E_FEE_TAX_MISMATCH` | `E_POST_SETTLEMENT_REFUND` | `E_SPLIT_PAYOUT_INCOMPLETE` | `E_UNKNOWN_RESIDUAL` | `E_UNMATCHABLE` |
+|---|---|---|---|---|---|---|---|
+| `A01_CLEAN` | 6 | 7 | 5 | 8 | 2 | 1 | 26 |
+| `A02_ROUNDING_DRIFT` | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
+| `A03_FEE_TAX_MISMATCH` | 0 | 1 | 5 | 1 | 2 | 1 | 0 |
+| `A04_TIMING_SHIFT` | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
+| `A05_DUPLICATE_CREDIT` | 0 | 10 | 0 | 0 | 0 | 0 | 0 |
+| `A06_POST_SETTLEMENT_REFUND` | 0 | 0 | 1 | 8 | 0 | 1 | 0 |
+| `A07_MISSING_REFERENCE` | 0 | 3 | 0 | 0 | 0 | 0 | 0 |
+| `A08_CHARGEBACK_NETTED` | 6 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `A09_SPLIT_PAYOUT` | 0 | 0 | 0 | 0 | 2 | 1 | 0 |
+| `A10_ORPHAN_BANK_CREDIT` | 0 | 0 | 0 | 0 | 0 | 0 | 9 |
+| `A12_LATE_ARRIVAL` | 0 | 2 | 0 | 1 | 0 | 0 | 0 |
 
 Rows may overlap: an exception naming a settlement, its payments and their
 orders is attributed to every anomaly touching any of them, so the rows do
@@ -564,17 +569,17 @@ with the bound named, never dropped.
 
 | Class | Rule | Bound | Applied | Refused |
 |---|---|---|---|---|
-| `E_DUPLICATE_CREDIT` | flag and link | never deletes anything | 12 | 0 |
+| `E_DUPLICATE_CREDIT` | flag and link | never deletes anything | 10 | 0 |
 
 Rounding budget committed this run: ₹0.00.
 
 ### Honest negative analysis (PLAN.md §9.1, D8)
 
-46 evaluation links were not asserted. Where they went:
+11 evaluation links were not asserted. Where they went:
 
 | Cause | Count | What it means |
 |---|---|---|
-| Settlements left unresolved | 3 | no tier could account for the payout; every payment nested in them is a missed link |
+| Settlements left unresolved | 0 | no tier could account for the payout; every payment nested in them is a missed link |
 | Settlements contested | 1 | two or more credits fit and the tier refused to pick -- T0/T1 mutual uniqueness, T2 `AMBIGUOUS_AGGREGATION`, T3's margin gate |
 | T2 subsets ambiguous | 1 | two different subsets of payments summed to the credit, so the partition is not determined by the sources |
 | T3 rejected below score | 0 | the best merchant-name match did not reach the similarity gate |
@@ -603,15 +608,15 @@ broken in two ways appears in two rows and the counts do not sum to the total.
 | `A01_CLEAN` | 81 | 97.53% |
 | `A02_ROUNDING_DRIFT` | 45 | 100.00% |
 | `A04_TIMING_SHIFT` | 48 | 100.00% |
-| `A07_MISSING_REFERENCE` | 85 | 75.29% |
-| `A09_SPLIT_PAYOUT` | 35 | 34.29% |
+| `A07_MISSING_REFERENCE` | 85 | 100.00% |
+| `A09_SPLIT_PAYOUT` | 35 | 74.29% |
 
 ### Money view
 
 | | |
 |---|---|
-| Reconciled | ₹59,45,645.25 |
-| Outstanding | ₹9,43,883.34 |
+| Reconciled | ₹67,18,192.36 |
+| Outstanding | ₹1,71,336.23 |
 | Total across evaluation links | ₹68,89,528.59 |
 | Unmatchable records (the honest ceiling) | 69 |
 | Unmatchable impact | ₹3,20,529.00 |
@@ -627,11 +632,11 @@ a real ceiling is never presented as a model failure.
 | Bank credits read | 80 |
 | ...carrying a recoverable UTR | 30 |
 | ...with no UTR (A07, plus the unrelated noise rows) | 50 |
-| ...joined to a settlement | 27 |
+| ...joined to a settlement | 33 |
 | Settlements read | 28 |
-| ...reached by at least one credit | 24 |
-| ...never joined | 4 |
-| Links asserted | 248 |
+| ...reached by at least one credit | 27 |
+| ...never joined | 1 |
+| Links asserted | 283 |
 
 #### Measured timings
 
@@ -640,13 +645,13 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 53 ms |
-| Throughput | 14,000 records/sec |
-| T0_EXACT | 16 ms |
-| T1_TOLERANCE | 2 ms |
-| T2_AGGREGATION | 2 ms |
-| T3_FUZZY | 3 ms |
-| T4_GRAPH | 19 ms |
+| Wall clock | 74 ms |
+| Throughput | 10,027 records/sec |
+| T0_EXACT | 23 ms |
+| T1_TOLERANCE | 3 ms |
+| T2_AGGREGATION | 5 ms |
+| T3_FUZZY | 4 ms |
+| T4_GRAPH | 27 ms |
 
 ## B0 -- Exact join on UTR (narration regex -> settlement.utr -> its payments)
 
@@ -754,8 +759,8 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 4 ms |
-| Throughput | 185,500 records/sec |
+| Wall clock | 6 ms |
+| Throughput | 123,667 records/sec |
 
 ## B1 -- Exact join + fuzzy reference recovery + nearest-amount match
 
@@ -863,5 +868,5 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 3 ms |
-| Throughput | 247,333 records/sec |
+| Wall clock | 5 ms |
+| Throughput | 148,400 records/sec |

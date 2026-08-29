@@ -1,0 +1,74 @@
+# LedgerLoop CI.
+#
+# Three commands, the same three `make check` runs locally, against the same
+# `pyproject.toml`. Nothing here configures ruff, mypy or pytest: their settings
+# live in `[tool.ruff]`, `[tool.mypy]` and `[tool.pytest.ini_options]`, and a
+# workflow that passed its own flags would be a second configuration that could
+# disagree with the one a contributor runs.
+#
+# WHY UBUNTU
+# ----------
+# The machine this project is developed on is Windows, where an Application
+# Control policy blocks mypy's compiled console entry point -- the local
+# workaround is `python -c "from mypy import api; ..."`, which is a fact about
+# that machine and not about the project. CI runs the console executable
+# normally, so the type check here is the unmodified one.
+#
+# NO KEYS, NO NETWORK
+# -------------------
+# The whole suite is deterministic and offline: `--no-llm` is the default when
+# no provider key is present, and there is a test asserting the deterministic
+# core imports without LangGraph. This workflow therefore needs no secrets, and
+# none are referenced.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch cancels the first: the older run's result is
+# about code nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: tests · ruff · mypy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # The floor `pyproject.toml` declares. Testing the oldest supported
+          # interpreter is what makes `requires-python = ">=3.11"` a claim
+          # rather than a hope.
+          python-version: "3.11"
+          cache: pip
+
+      # `[dev]` is the extra `make check` uses. It carries pytest, hypothesis,
+      # coverage, mypy, ruff, and both optional runtime extras -- so the UI and
+      # graph tests run here rather than being silently skipped.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Tests
+        run: python -m pytest
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Mypy (strict)
+        run: python -m mypy

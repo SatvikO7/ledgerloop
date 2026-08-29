@@ -160,14 +160,33 @@ def prose_for(
         )
 
     if exception_class is ExceptionClass.SPLIT_PAYOUT_INCOMPLETE:
+        # Two subjects reach this class and they need different sentences. A
+        # settlement "was paid in tranches"; a bank credit *is* one of them, and
+        # telling a controller that a credit was paid in tranches would be
+        # nonsense. `day_gap` is the discriminator the classifier sets, exactly
+        # as it does for DUPLICATE_CREDIT above.
+        if day_gap is None:
+            return Prose(
+                root_cause=(
+                    f"{subject} was paid in tranches and the credits carrying its "
+                    f"reference do not account for the whole {amount} payout.{tail}"
+                ),
+                suggested_action=(
+                    f"Ask the PSP for the tranche schedule behind {subject}; at least "
+                    "one tranche is missing from the statement or carries a different "
+                    "reference."
+                ),
+            )
         return Prose(
             root_cause=(
-                f"{subject} was paid in tranches and the credits carrying its reference "
-                f"do not account for the whole {amount} payout.{tail}"
+                f"{subject} credits {amount} under a reference that also appears on "
+                f"{counterpart or 'another credit'} for a different amount. The payout "
+                f"was split across them and the ladder could not establish which "
+                f"payments travelled in which tranche.{tail}"
             ),
             suggested_action=(
-                f"Ask the PSP for the tranche schedule behind {subject}; at least one "
-                "tranche is missing from the statement or carries a different reference."
+                f"Ask the PSP which payments {subject} carries; the tranche split is "
+                "not derivable from the statement alone."
             ),
         )
 

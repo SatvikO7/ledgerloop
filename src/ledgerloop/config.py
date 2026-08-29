@@ -39,6 +39,7 @@ __all__ = [
     "MatchingTolerances",
     "RunConfig",
     "SeverityThresholds",
+    "SplitCompletion",
     "prevalence_for",
 ]
 
@@ -130,6 +131,47 @@ class LexicalMatching(FrozenLedgerModel):
         "T1's +/-3 because T3's residual is precisely the batches other anomalies have "
         "already moved -- A04 shifts a credit two days and A12 shifts a settlement by up "
         "to nine, and a window that excluded them would lose the links T3 exists for.",
+    )
+
+
+class SplitCompletion(FrozenLedgerModel):
+    """T2 reaching a split payout whose tranches carry no reference (Phase 2.5).
+
+    ``run_tier2`` finds the tranches of a split payout through the settlement's
+    **key**: ``credit_bucket`` reads ``open_credits_for(view.utr)``. When A09
+    ``SPLIT_PAYOUT`` composes with A07 ``MISSING_REFERENCE`` -- the narration on
+    every tranche loses its UTR -- that index is empty, T2 sees no credits at
+    all, and the batch falls through the whole ladder. On ``test`` seed 42 that
+    was three of the four settlements holding *every one* of the 46 links the
+    system still missed.
+
+    This pass supplies the tranche set from T3's evidence instead, and then runs
+    **T2's own** :func:`~ledgerloop.matching.tier2_aggregation._solve` over it
+    unchanged. It is therefore not a second reconciliation mechanism; it is the
+    existing one reaching a candidate set the key could not name.
+
+    ONE FIELD, AND NO NEW CONSTANTS
+    -------------------------------
+    There is deliberately no window, no score gate and no pool cap here. The
+    candidate pool is built from :class:`LexicalMatching` -- the same merchant
+    gate and the same date window T3 already applies -- because a threshold
+    invented for this pass would be a threshold fitted to the corpus it was
+    invented on. The uniqueness requirement is the solver's own
+    ``SubsetSearch.exhaustive``, which refuses rather than guesses when the pool
+    grows past what can be searched exhaustively.
+
+    Measured: widening the date window from 7 days to 90 changes **nothing** --
+    42 settlements found, 42 tranche sets correct, 0 ambiguous either way. The
+    exact-sum arithmetic is what makes the pass safe; the lexical gate keeps the
+    pool small and the evidence chain meaningful, and it is not load-bearing for
+    precision. See ``.local/steps/phase-2-5.md`` §3.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="False restores the pre-Phase-2.5 behaviour, in which a split "
+        "payout whose tranches lost their reference is never reached by any "
+        "tier. The evaluation runs both arms.",
     )
 
 
@@ -423,6 +465,7 @@ class RunConfig(FrozenLedgerModel):
     tolerances: MatchingTolerances = Field(default_factory=MatchingTolerances)
     duplicates: DuplicateDetection = Field(default_factory=DuplicateDetection)
     lexical: LexicalMatching = Field(default_factory=LexicalMatching)
+    split_completion: SplitCompletion = Field(default_factory=SplitCompletion)
     graph: GraphInference = Field(default_factory=GraphInference)
     thresholds: DecisionThresholds = Field(default_factory=DecisionThresholds)
     severity: SeverityThresholds = Field(default_factory=SeverityThresholds)

@@ -26,8 +26,31 @@ ladder prefix and per-class figure to six places. That is the strongest
 statement available about the change: it is additive, it is switchable, and
 turning it off reproduces Steps 4-9 to the digit rather than approximately.
 
-:class:`TestPhase2Defaults` pins what the shipped configuration measures now.
-Both sets are exact. One exception recall moved in *both* arms, and its own test
+PHASE 2.5 ADDED A THIRD ARM, AND KEPT THE FIRST TWO
+----------------------------------------------------
+Phase 2.5 added split completion -- T2's arithmetic over a tranche set T3's
+merchant master supplies. So there are now **three** configurations pinned on
+one corpus, and each reproduces its own era exactly:
+
+===================================  ==========  ==========  ==========
+arm                                  TP/FP/FN    recall      match rate
+===================================  ==========  ==========  ==========
+Steps 4-9   (both passes off)        130/0/164   0.442177    0.426087
+Phase 2.3   (duplicates only)        248/0/46    0.843537    0.797101
+Phase 2.5   (shipped)                283/0/11    0.962585    0.915942
+===================================  ==========  ==========  ==========
+
+Read as one table that is what the project's whole argument looks like as
+numbers: recall more than doubled across two changes and the false-positive
+column never left zero.
+
+The `T0-T2` ablation prefix is **identical in the last two arms** -- 0.625850
+either way -- because split completion is gated on T2 *and* T3 both being
+enabled. That is not a coincidence to be grateful for; it is the gate, and
+:meth:`TestPhase25Defaults.test_the_t0_t2_ablation_row_is_untouched` is the
+check.
+
+Every set is exact. One exception recall moved in *all* arms, and its own test
 says why.
 """
 
@@ -35,7 +58,7 @@ from __future__ import annotations
 
 import pytest
 
-from ledgerloop.config import DuplicateDetection, GeneratorConfig
+from ledgerloop.config import DuplicateDetection, GeneratorConfig, SplitCompletion
 from ledgerloop.eval.baselines import run_b0
 from ledgerloop.eval.harness import run_system
 from ledgerloop.eval.metrics import evaluate
@@ -47,6 +70,10 @@ from ledgerloop.models.enums import AnomalyClass, SplitName
 #: duplicate-posting pass off, which is what makes "Phase 2.3 changed nothing
 #: else" a check rather than a claim.
 PRE_PHASE_2 = DuplicateDetection(enabled=False)
+
+#: The pre-Phase-2.5 pass switch. Steps 4-9 and Phase 2.3 are both measured with
+#: split completion off; only the shipped arm has it on.
+NO_SPLIT = SplitCompletion(enabled=False)
 
 #: The ladder as it stands: T0-T4 uncalibrated, on `test` seed 42, generator
 #: 0.2.0. Uncalibrated because the fitted bundle is an artefact this test would
@@ -77,15 +104,26 @@ def corpus(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def system(corpus):
-    """The ladder as Steps 4-9 ran it: Phase 2.3's pass switched off."""
+    """The ladder as Steps 4-9 ran it: both Phase 2 passes switched off."""
     return run_system(
-        corpus, duplicates=PRE_PHASE_2, measure_calibration_quality=False
+        corpus,
+        duplicates=PRE_PHASE_2,
+        split_completion=NO_SPLIT,
+        measure_calibration_quality=False,
+    )
+
+
+@pytest.fixture(scope="module")
+def phase_2_3(corpus):
+    """The ladder as Phase 2.3 shipped it: duplicates on, split completion off."""
+    return run_system(
+        corpus, split_completion=NO_SPLIT, measure_calibration_quality=False
     )
 
 
 @pytest.fixture(scope="module")
 def shipped(corpus):
-    """The ladder as it ships after Phase 2, with every default in force."""
+    """The ladder as it ships now, with every default in force."""
     return run_system(corpus, measure_calibration_quality=False)
 
 
@@ -163,6 +201,7 @@ class TestThePerTierResultsAreUnmoved:
             corpus,
             enabled_tiers=tiers,
             duplicates=PRE_PHASE_2,
+            split_completion=NO_SPLIT,
             measure_calibration_quality=False,
         )
         links = run.metrics.link_metrics
@@ -259,15 +298,18 @@ class TestTheCorpusItselfIsUnmoved:
 
 
 class TestPhase2Defaults:
-    """What the shipped configuration measures, pinned as exactly as the rest.
+    """What Phase 2.3 measured: the duplicate-posting pass and nothing after it.
 
     Every number here is on the same corpus as the historical pins above, so the
-    two classes read as one before-and-after table. Precision and the false
-    positive cost are the ones that must not move, and they do not.
+    classes read as one before-and-after table. Precision and the false-positive
+    cost are the ones that must not move, and they do not.
+
+    Measured with ``split_completion`` **off**, so these stay the numbers Phase
+    2.3 published rather than drifting with every later change.
     """
 
-    def test_the_link_counts_after_the_duplicate_posting_pass(self, shipped):
-        links = shipped.metrics.link_metrics
+    def test_the_link_counts_after_the_duplicate_posting_pass(self, phase_2_3):
+        links = phase_2_3.metrics.link_metrics
         assert links is not None
         actual = {
             "true_positives": links.true_positives,
@@ -282,17 +324,17 @@ class TestPhase2Defaults:
             "false_positive_cost_minor": 0,
         }
 
-    def test_precision_is_still_exactly_one(self, shipped):
+    def test_precision_is_still_exactly_one(self, phase_2_3):
         """The whole point. 118 more links asserted and still nothing wrong."""
-        assert shipped.metrics.auto_match_precision == 1.0
+        assert phase_2_3.metrics.auto_match_precision == 1.0
 
-    def test_recall_is_0_8435(self, shipped):
-        links = shipped.metrics.link_metrics
+    def test_recall_is_0_8435(self, phase_2_3):
+        links = phase_2_3.metrics.link_metrics
         assert links is not None
         assert links.recall == pytest.approx(0.8435, abs=5e-5)
 
-    def test_match_rate_is_0_7971(self, shipped):
-        assert shipped.metrics.match_rate == pytest.approx(0.7971, abs=5e-5)
+    def test_match_rate_is_0_7971(self, phase_2_3):
+        assert phase_2_3.metrics.match_rate == pytest.approx(0.7971, abs=5e-5)
 
     @pytest.mark.parametrize(
         ("tiers", "recall"),
@@ -308,7 +350,12 @@ class TestPhase2Defaults:
     ):
         """The pass lifts every rung, T4 still contributes nothing, and no rung
         buys its recall with a false positive."""
-        run = run_system(corpus, enabled_tiers=tiers, measure_calibration_quality=False)
+        run = run_system(
+            corpus,
+            enabled_tiers=tiers,
+            split_completion=NO_SPLIT,
+            measure_calibration_quality=False,
+        )
         links = run.metrics.link_metrics
         assert links is not None
         assert links.recall == pytest.approx(recall, abs=5e-6)
@@ -325,7 +372,7 @@ class TestPhase2Defaults:
         ],
     )
     def test_per_class_recall_including_the_row_that_did_not_move(
-        self, shipped, anomaly, recall
+        self, phase_2_3, anomaly, recall
     ):
         """A09 SPLIT_PAYOUT is pinned at exactly its old 0.342857, and that is
         the honest headline of Phase 2.3: the pass fixed the duplicate-posting
@@ -333,7 +380,7 @@ class TestPhase2Defaults:
         the 46 links still missing. Reported as unmoved rather than averaged
         away.
         """
-        assert shipped.metrics.recall_by_anomaly_class[anomaly] == pytest.approx(
+        assert phase_2_3.metrics.recall_by_anomaly_class[anomaly] == pytest.approx(
             recall, abs=5e-6
         )
 
@@ -352,3 +399,157 @@ class TestPhase2Defaults:
         assert all(
             f"bank_txn:{txn_id}" in covered for txn_id in duplicates.reposted_ids
         )
+
+
+class TestPhase25Defaults:
+    """What the shipped configuration measures, pinned as exactly as the rest.
+
+    The third arm of the table in this module's docstring. Phase 2.5 added split
+    completion: T2's own arithmetic over a tranche set T3's merchant master
+    supplies, for the payouts whose every tranche lost its reference.
+    """
+
+    def test_the_link_counts_after_split_completion(self, shipped):
+        links = shipped.metrics.link_metrics
+        assert links is not None
+        actual = {
+            "true_positives": links.true_positives,
+            "false_positives": links.false_positives,
+            "false_negatives": links.false_negatives,
+            "false_positive_cost_minor": links.false_positive_cost_minor,
+        }
+        assert actual == {
+            "true_positives": 283,
+            "false_positives": 0,
+            "false_negatives": 11,
+            "false_positive_cost_minor": 0,
+        }
+
+    def test_precision_is_still_exactly_one(self, shipped):
+        """35 more links asserted than Phase 2.3, and still nothing wrong."""
+        assert shipped.metrics.auto_match_precision == 1.0
+
+    def test_recall_is_0_9626(self, shipped):
+        links = shipped.metrics.link_metrics
+        assert links is not None
+        assert links.recall == pytest.approx(0.9626, abs=5e-5)
+
+    def test_match_rate_is_0_9159_and_clears_the_target(self, shipped):
+        """The first arm of this project to clear the >= 0.85 match-rate goal on
+        `standard` difficulty at this seed."""
+        assert shipped.metrics.match_rate == pytest.approx(0.9159, abs=5e-5)
+        assert shipped.metrics.match_rate >= 0.85
+
+    def test_the_t0_t2_ablation_row_is_untouched(self, corpus):
+        """The gate, checked rather than trusted.
+
+        Split completion needs T3's merchant master to build a candidate pool
+        and T2's solver to partition it, so the pipeline runs it only when both
+        tiers are enabled. The consequence is that the published `T0-T2`
+        ablation row cannot move -- and if it ever does, the gate has been
+        loosened and a published number has changed silently.
+        """
+        for tiers, expected in (((0, 1), 0.496599), ((0, 1, 2), 0.625850)):
+            with_pass = run_system(
+                corpus, enabled_tiers=tiers, measure_calibration_quality=False
+            )
+            without = run_system(
+                corpus,
+                enabled_tiers=tiers,
+                split_completion=NO_SPLIT,
+                measure_calibration_quality=False,
+            )
+            assert with_pass.metrics.link_metrics is not None
+            assert without.metrics.link_metrics is not None
+            assert with_pass.metrics.link_metrics.recall == pytest.approx(
+                expected, abs=5e-6
+            )
+            assert without.metrics.link_metrics.recall == pytest.approx(
+                expected, abs=5e-6
+            )
+
+    @pytest.mark.parametrize(
+        ("tiers", "recall"),
+        [
+            ((0, 1), 0.496599),
+            ((0, 1, 2), 0.625850),
+            ((0, 1, 2, 3), 0.962585),
+            ((0, 1, 2, 3, 4), 0.962585),
+        ],
+    )
+    def test_every_ladder_prefix_and_none_loses_precision(self, corpus, tiers, recall):
+        run = run_system(corpus, enabled_tiers=tiers, measure_calibration_quality=False)
+        links = run.metrics.link_metrics
+        assert links is not None
+        assert links.recall == pytest.approx(recall, abs=5e-6)
+        assert links.false_positives == 0
+
+    @pytest.mark.parametrize(
+        ("anomaly", "recall"),
+        [
+            (AnomalyClass.CLEAN, 0.975309),
+            (AnomalyClass.ROUNDING_DRIFT, 1.0),
+            (AnomalyClass.TIMING_SHIFT, 1.0),
+            (AnomalyClass.MISSING_REFERENCE, 1.0),
+            (AnomalyClass.SPLIT_PAYOUT, 0.742857),
+        ],
+    )
+    def test_per_class_recall_including_the_row_that_is_still_short(
+        self, shipped, anomaly, recall
+    ):
+        """A09 moved from 0.342857 to 0.742857 and is **still the short row**.
+
+        The remainder is one settlement whose two payment subsets both reach the
+        same tranche inside tolerance. The system refuses it, and this pin is
+        what stops a later change quietly asserting it.
+        """
+        assert shipped.metrics.recall_by_anomaly_class[anomaly] == pytest.approx(
+            recall, abs=5e-6
+        )
+
+    def test_the_pass_fired_and_says_how_often(self, shipped):
+        outcome = shipped.matched.split_completion
+        assert outcome.settlements_seen == 3
+        assert outcome.settlements_resolved == 3
+        assert outcome.credits_matched == 6
+        assert outcome.payments_matched == 35
+
+    def test_the_one_case_it_must_refuse_is_still_refused(self, shipped, corpus):
+        """SETL-0001 is the whole of the remaining gap and must stay refused.
+
+        Its tranches carry the settlement's reference, so it never reaches this
+        pass at all -- T2 owns it through the keyed path and already declined
+        it, because two different payment subsets reach BNK-00108 within
+        tolerance. Every one of the 11 links still missing belongs to it.
+        """
+        from ledgerloop.eval.metrics import confusion
+
+        truth = load_ground_truth(corpus)
+        matrix = confusion(
+            [p.pair for p in shipped.matched.predictions], truth.evaluation_pairs
+        )
+        owner = {
+            f"payment:{payment.payment_id}": view.settlement_id
+            for view in shipped.matched.context.settlements
+            for payment in view.payments
+        }
+        assert len(matrix.false_negatives) == 11
+        assert {owner[pair[0]] for pair in matrix.false_negatives} == {"SETL-0001"}
+
+    def test_the_refused_case_is_reported_as_a_split_not_a_duplicate(self, shipped):
+        """Two tranches sharing a reference for **different** amounts are a split.
+
+        Reporting them as duplicates of each other -- which is what the queue
+        did before Phase 2.5 -- tells a controller to chase a reversal that does
+        not exist.
+        """
+        rows = {
+            ref.record_id: item.exception_class.value
+            for item in shipped.exceptions
+            for ref in item.involved_refs
+            if ref.record_id in {"BNK-00001", "BNK-00108"}
+        }
+        assert rows == {
+            "BNK-00001": "E_SPLIT_PAYOUT_INCOMPLETE",
+            "BNK-00108": "E_SPLIT_PAYOUT_INCOMPLETE",
+        }

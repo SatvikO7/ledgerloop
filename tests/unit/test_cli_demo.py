@@ -278,7 +278,7 @@ class TestItOpensOnTheCorpusTheDocumentsQuote:
         stored = load_run(completed / "runs" / "t0t4-test-42")
         assert stored is not None
         assert stored.metrics["auto_match_precision"] == 1.0
-        assert stored.metrics["true_positives"] == 248
+        assert stored.metrics["true_positives"] == 283
         assert stored.metrics["false_positives"] == 0
-        assert stored.metrics["false_negatives"] == 46
-        assert stored.metrics["match_rate"] == pytest.approx(0.7971, abs=5e-5)
+        assert stored.metrics["false_negatives"] == 11
+        assert stored.metrics["match_rate"] == pytest.approx(0.9159, abs=5e-5)

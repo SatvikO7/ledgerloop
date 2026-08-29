@@ -10,8 +10,8 @@ cause, an evidence chain, and a rupee figure.
 | On `test`, 5 seeds, standard difficulty | |
 |---|---|
 | **Auto-match precision** | **1.0000 ± 0.0000** — 0 false positives across all 5 runs, ₹0 of wrong money |
-| **Link recall** | 0.8049 ± 0.0792 |
-| **Match rate** | 0.7711 ± 0.0861 *(target ≥ 0.85 — see [Limitations](#limitations-stated-rather-than-buried))* |
+| **Link recall** | 0.8844 ± 0.0788 |
+| **Match rate** | **0.8533 ± 0.0810** — clears the ≥ 0.85 target |
 | **Exception recall** | 0.9818 ± 0.0250 |
 | **LLM calls** | **0** — every number above is deterministic and reproducible with no API key |
 
@@ -107,7 +107,7 @@ The ladder runs in order and each tier sees only what the previous ones left:
 |---|---|---|
 | **T0** exact key | UTR / order reference, exact amount | yes |
 | **T1** tolerance | ±0.5% or ₹1, ±3 days, **mutual** uniqueness both ways | yes |
-| **T2** aggregation | meet-in-the-middle subset-sum, anchored on the settlement; **counts** solutions and refuses when two fit | yes |
+| **T2** aggregation | meet-in-the-middle subset-sum, anchored on the settlement; **counts** solutions and refuses when two fit. Also completes a split payout whose tranches lost their reference, over a candidate set T3's merchant master supplies | yes |
 | **T3** lexical | merchant master **derived from the statement's own references**, RapidFuzz, score and margin gates | yes |
 | **T4** graph | path closure, sibling completion, exclusivity over an in-memory graph | yes |
 | **T5** LLM | proposes a link and a hypothesis for the residual | **no — and it never decides** |
@@ -281,19 +281,19 @@ link-level ground truth read back off disk.
 | B0 | Exact join on UTR | 0.5909 | 0.6633 | 0.6580 | 135 | ₹34,98,306 |
 | B1 | Exact + fuzzy + nearest amount | 0.6540 | 0.8810 | 0.8667 | 137 | ₹35,37,867 |
 | B2 | LLM-only, output asserted unverified § | 0.7000 | 0.7119 | 0.9706 | 18 | ₹4,32,588 |
-| **B3** | **LedgerLoop** | **1.0000** | **0.8435** | 0.7971 | **0** | **₹0** |
+| **B3** | **LedgerLoop** | **1.0000** | **0.9626** | **0.9159** | **0** | **₹0** |
 
-The baselines reach further on match rate; every one of them is wrong in rupees. The
-deterministic ladder is never wrong, and the false-positive column is what that trade costs
-a finance team. § B2 is on a **different, smaller corpus** (`dev`, 59 links vs 294) and its
+The deterministic ladder now beats every baseline on recall *and* is the only one that is
+never wrong. The false-positive column is what the others pay for the difference.
+§ B2 is on a **different, smaller corpus** (`dev`, 59 links vs 294) and its
 prompts were answered by a documented offline stand-in, not a language model — its accuracy
 figures say nothing about any model. `EVALUATION.md` banners both facts.
 
 **Across five seeds** (`test`, standard difficulty, mean ± sample standard deviation):
 
 ```
-precision  1.0000 ± 0.0000      recall  0.8049 ± 0.0792
-match rate 0.7711 ± 0.0861      exception recall  0.9818 ± 0.0250
+precision  1.0000 ± 0.0000      recall  0.8844 ± 0.0788
+match rate 0.8533 ± 0.0810      exception recall  0.9818 ± 0.0250
 0 false positives across all five runs
 ```
 
@@ -303,10 +303,10 @@ all of them:
 | Ladder | Recall | Marginal |
 |---|---|---|
 | T0 | 0.3489 ± 0.0206 | +0.3489 |
-| T0–T1 | 0.5123 ± 0.1019 | **+0.1634** |
-| T0–T2 | 0.6625 ± 0.0565 | +0.1502 |
-| T0–T3 | 0.8049 ± 0.0792 | +0.1424 |
-| T0–T4 | 0.8049 ± 0.0792 | +0.0000 |
+| T0–T1 | 0.5123 ± 0.1019 | +0.1634 |
+| T0–T2 | 0.6972 ± 0.0700 | **+0.1849** |
+| T0–T3 | 0.8844 ± 0.0788 | **+0.1872** |
+| T0–T4 | 0.8844 ± 0.0788 | +0.0000 |
 
 T4 fires zero times on this corpus. That is reported rather than engineered around.
 
@@ -314,14 +314,14 @@ T4 fires zero times on this corpus. That is reported rather than engineered arou
 
 | | easy | standard | hard |
 |---|---|---|---|
-| Recall | 0.8776 ± 0.0363 | 0.8049 ± 0.0792 | 0.7414 ± 0.1048 |
-| Match rate | 0.8571 ± 0.0389 | 0.7711 ± 0.0861 | 0.7063 ± 0.1020 |
+| Recall | 0.9067 ± 0.0398 | 0.8844 ± 0.0788 | 0.8624 ± 0.0702 |
+| Match rate | 0.8886 ± 0.0430 | 0.8533 ± 0.0810 | 0.8281 ± 0.0715 |
 | Exception recall | 0.9784 ± 0.0296 | 0.9818 ± 0.0250 | 0.9920 ± 0.0179 |
 | Precision | 1.0000 | 1.0000 | 1.0000 |
 
 Recall falls, exception recall rises, precision does not move: the system asserts less and
-describes more as more of the corpus breaks. The `easy` column clears the ≥ 0.85 match-rate
-target; `standard` and `hard` do not.
+describes more as more of the corpus breaks. `easy` and `standard` clear the ≥ 0.85
+match-rate target; `hard` does not.
 
 ### What Phase 2 changed, measured
 
@@ -344,18 +344,74 @@ Both arms, same fifteen corpora, same bundle, one configuration field apart:
 
 | | easy | standard | hard |
 |---|---|---|---|
-| Recall, without the pass | 0.8122 ± 0.0641 | 0.5808 ± 0.1951 | 0.4446 ± 0.1156 |
-| Recall, with it | **0.8776 ± 0.0363** | **0.8049 ± 0.0792** | **0.7414 ± 0.1048** |
+| Recall, without the pass | 0.8412 ± 0.0677 | 0.6603 ± 0.1678 | 0.5657 ± 0.1069 |
+| Recall, with it | **0.9067 ± 0.0398** | **0.8844 ± 0.0788** | **0.8624 ± 0.0702** |
 | Δ | +0.0654 | **+0.2240** | **+0.2967** |
 | Match rate, Δ | +0.0627 | +0.2078 | +0.2749 |
 | Precision | 1.0000 → 1.0000 | 1.0000 → 1.0000 | 1.0000 → 1.0000 |
 | False positives | 0 → **0** | 0 → **0** | 0 → **0** |
+
+Both arms are measured on the **current** system, so the absolute levels include the two
+later changes below. The deltas are unchanged from when this was first measured — +0.0654,
++0.2240, +0.2967 to the digit — which is what says the duplicate pass's contribution is
+independent of what came after it.
 
 **No threshold, tolerance or gate moved.** The pass's own two knobs can only be turned
 towards asserting *less*, and switching it off reproduces every pre-Phase-2 number to the
 digit — 130/0/164, recall 0.4422, match rate 0.4261, every ladder prefix and every per-class
 figure to six places, asserted exactly rather than approximately by
 `tests/unit/test_metrics_regression.py`.
+
+### Then: the split payouts nothing could reach
+
+That left 46 missing links on seed 42, all of them four settlements paid in **two
+tranches**, and `A09_SPLIT_PAYOUT` recall pinned at 0.3429. The cause was structural rather
+than a threshold. T2 finds a split payout's tranches through the settlement's **key**; when
+A09 composes with A07 and every tranche's narration loses its reference, that index is
+empty and T2 never sees the batch. T3 cannot help either — it tests a candidate against the
+**whole net**, and a tranche never is.
+
+So T2's arithmetic is given a candidate set T3's merchant master supplies: unclaimed,
+unreferenced credits naming the batch's merchant, and then a subset-sum over the **credit**
+amounts targeting the net **exactly**. Not a band — a split payout conserves money by
+construction, so a tolerance would admit sets that are merely close. Refused unless the
+credit set is exhaustively unique *and* the payments then partition uniquely across it.
+Not one line of the arithmetic is duplicated: the partition is `_solve`, T2's own.
+
+Validated before it was written — over all 29 corpora the tranche-set search found **42
+unique sets and was right on 42 of them**, and it is *insensitive* to the merchant gate and
+the date window: with both removed entirely, still zero wrong sets. The exact-sum
+arithmetic is what makes it safe, and the report says so rather than crediting the filters.
+
+| | easy | standard | hard |
+|---|---|---|---|
+| Recall, without split completion | 0.9006 ± 0.0335 | 0.8396 ± 0.0720 | 0.7706 ± 0.0765 |
+| Recall, with it | **0.9067 ± 0.0398** | **0.8844 ± 0.0788** | **0.8624 ± 0.0702** |
+| Δ | +0.0061 | +0.0448 | **+0.0918** |
+| Match rate, Δ | +0.0066 | +0.0454 | +0.0916 |
+| Precision | 1.0000 → 1.0000 | 1.0000 → 1.0000 | 1.0000 → 1.0000 |
+| False positives | 0 → **0** | 0 → **0** | 0 → **0** |
+
+Across all 29 corpora the pass saw 42 settlements, resolved 38, **refused 26**, gained 398
+links and produced **zero** false positives.
+
+### And a defect the probe turned up on the way
+
+Two of the three seed-42 cases still refused after the tranche set was found correctly, and
+the reason was a pre-existing bug in T2. `payment_bucket` drops a payment a negative
+adjustment identifies as charged back — its money never reached the bank — but the
+allocation that *sizes* the tranches still divided by the gross of **every** nested payment.
+Each tranche came out short by its share of money that was never paid: ₹19,290.79 on one
+seed-42 batch, far outside any tolerance. Allocating over the bucket instead makes the
+prediction exact, delta 0, on every tranche of every case.
+
+It is a correctness fix, so it is **not** switchable — a flag for a bug is an invitation to
+run the buggy arm — and its effect is measured against the previous commit instead. Seed 42
+is unaffected, which is why every seed-42 pin still holds; seeds 43–46 gain, and the
+multi-seed rows move: full-ladder recall 0.8049 ± 0.0792 → 0.8396 ± 0.0720 and the `T0-T2`
+ablation row 0.6625 ± 0.0565 → 0.6972 ± 0.0700, with zero false positives throughout. Those
+are published numbers changing, so they are reported per seed in the step notes rather than
+left to drift.
 
 A second, **independent** Phase 2 change took exception recall from the 0.8753 ± 0.0689
 the previous release reported to **0.9818 ± 0.0250**: orders refunded *after* their own
@@ -382,18 +438,20 @@ block of measured timings.
 The uncomfortable numbers are printed in `EVALUATION.md` beside the good ones. The ones
 worth knowing before you look:
 
-- **Match rate still misses its target.** 0.7711 ± 0.0861 at standard difficulty against a
-  ≥ 0.85 goal — up from 0.5633 ± 0.1956, and clearing the target on `easy` (0.8571 ± 0.0389)
-  but not on `standard` or `hard`. The system asserts less than it could, on purpose; the
-  precision column is what that buys and the false-positive column is what the baselines pay
-  for the difference.
-- **Every missing link on seed 42 is a split payout.** 46 of them, across four settlements,
-  and the per-class recall for `A09_SPLIT_PAYOUT` is pinned at **0.3429 — exactly unmoved by
-  Phase 2**. Three of the four are batches paid in two tranches whose narrations *also* lost
-  their references, so no tier finds the tranche pair at all; the fourth is genuinely
-  ambiguous, with two different payment subsets summing to the same credit inside tolerance.
-  The system refuses it and says so. That is the whole of the remaining gap and it is
-  reported as unmoved rather than averaged away.
+- **Match rate meets its target on `standard`, not on `hard`.** 0.8533 ± 0.0810 against
+  a ≥ 0.85 goal, up from 0.5633 ± 0.1956 at the start of Phase 2; `easy` is 0.8886 ± 0.0430
+  and `hard` is 0.8281 ± 0.0715, which still misses. On seed 42 the target is met on the
+  *interval* — 0.9159 with a 95% lower bound of 0.8819 — which is the stronger statement.
+- **Every missing link on seed 42 is one settlement, and it is genuinely ambiguous.** 11 of
+  them, all `SETL-0001`, whose two tranches carry the reference so T2 reaches it directly
+  and declines: two *different* payment subsets reach the same tranche within tolerance, and
+  picking one would be a coin flip. `A09_SPLIT_PAYOUT` recall is 0.7429, up from 0.3429, and
+  it is **still the short row** — pinned in the regression suite so a later change cannot
+  quietly assert what this one refuses.
+- **Precision's verdict is *undecided*, not *met*.** 283 of 283 correct does not demonstrate
+  ≥ 0.99 from 283 samples: the 95% Wilson lower bound is 0.9866, which is below the target.
+  That is a statement about sample size rather than a defect, and the report prints the
+  verdict from the interval rather than the point estimate.
 - **T4 fires zero times on this corpus.** Every earlier tier matches at settlement
   granularity, so the partial assignments its rules exist to finish never arise. Reported
   as zero rather than engineered around; loosening a rule until it fired would trade
@@ -427,8 +485,11 @@ worth knowing before you look:
   the target sits inside it. The report calls that *undecided* rather than a pass.
 - **The `scale` split has never been benchmarked.** The generator supports 5,000 orders;
   no throughput run has been made against it.
-- **No CI.** For a project with 2,000+ tests the absence of a green badge is conspicuous;
-  `make check` runs the same three commands locally.
+- **CI is configured but has never run.** `.github/workflows/ci.yml` runs the same three
+  commands as `make check` on push and pull request. It was validated statically and each
+  command was run locally, but this environment cannot execute a GitHub-hosted job — so
+  **there is no badge in this README yet**, because a badge for a workflow nobody has
+  watched go green would assert a build that has not happened.
 - **Synthetic data only.** Eleven anomaly classes at controlled prevalence from a seeded
   generator. Nothing here has met a real bank statement.
 
@@ -449,7 +510,7 @@ Four scope decisions taken before implementation:
 uv venv --python 3.11
 uv pip install -e ".[dev]"      # add ".[demo]" for LangGraph + Streamlit
 
-uv run pytest                   # 2292 passed
+uv run pytest                   # 2342 passed
 uv run ruff check .
 uv run mypy                     # --strict, 99 source files
 ```

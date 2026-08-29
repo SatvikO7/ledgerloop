@@ -47,6 +47,7 @@ from ledgerloop.agent.nodes import (
     build_entity_graph,
     calibrate_and_decide,
     classify_exceptions_node,
+    complete_splits_node,
     explain_exceptions,
     generate_report,
     ingest_sources,
@@ -86,9 +87,10 @@ GRAPH_EDGES: tuple[tuple[str, str, str | None], ...] = (
     ("ingest_sources", "normalize_records", None),
     ("normalize_records", "build_entity_graph", None),
     ("build_entity_graph", "tier_ladder", "residual passes remain"),
-    ("build_entity_graph", "llm_adjudicate", "no residual tier is enabled"),
+    ("build_entity_graph", "complete_splits", "no residual tier is enabled"),
     ("tier_ladder", "tier_ladder", "the last pass added candidates"),
-    ("tier_ladder", "llm_adjudicate", "the last pass added nothing, or the cap is hit"),
+    ("tier_ladder", "complete_splits", "the last pass added nothing, or the cap is hit"),
+    ("complete_splits", "llm_adjudicate", None),
     ("llm_adjudicate", "calibrate_and_decide", None),
     ("calibrate_and_decide", "classify_exceptions", None),
     ("classify_exceptions", "explain_exceptions", None),
@@ -178,6 +180,7 @@ def build_recon_graph(
         ("normalize_records", normalize_records),
         ("build_entity_graph", build_entity_graph),
         ("tier_ladder", tier_ladder),
+        ("complete_splits", complete_splits_node),
         ("llm_adjudicate", llm_adjudicate),
         ("calibrate_and_decide", calibrate_and_decide),
         ("classify_exceptions", classify_exceptions_node),
@@ -194,9 +197,14 @@ def build_recon_graph(
     # The conditional branch and the cycle. Both read
     # `should_run_residual_pass` through `should_loop`, so the graph's loop and
     # the direct path's `while` are the same predicate rather than two copies.
+    # The loop's exit lands on `complete_splits`, not on T5: the split-completion
+    # stage is the last thing the deterministic ladder does, and it has to see a
+    # pool nothing else will touch again. `should_loop` still returns the name
+    # `llm_adjudicate` for "stop looping" -- that is `should_run_residual_pass`'s
+    # own vocabulary and is left alone -- so the mapping is what redirects it.
     loop_targets = {
         "tier_ladder": "tier_ladder",
-        "llm_adjudicate": "llm_adjudicate",
+        "llm_adjudicate": "complete_splits",
         "__end__": END,
     }
     builder.add_conditional_edges(
@@ -207,6 +215,7 @@ def build_recon_graph(
     )
 
     for source, target in (
+        ("complete_splits", "llm_adjudicate"),
         ("llm_adjudicate", "calibrate_and_decide"),
         ("calibrate_and_decide", "classify_exceptions"),
         ("classify_exceptions", "explain_exceptions"),

@@ -90,10 +90,10 @@ LedgerLoop demo
       the `test` split is never fitted on; the bundle's provenance says so
 
 [3/4] reconciling
-      11 node visit(s), 2 residual pass(es), 670 audit event(s) in 2526 ms
-      precision 1.0000 [0.9847, 1.0000] - recall 0.8435 - match rate 0.7971
-      248 correct - 0 false positives costing ₹0.00 - 46 missed
-      74 exception(s) covering ₹65,09,124.90, exception recall 1.0000 over 30
+      12 node visit(s), 2 residual pass(es), 704 audit event(s) in 3068 ms
+      precision 1.0000 [0.9866, 1.0000] - recall 0.9626 - match rate 0.9159
+      283 correct - 0 false positives costing ₹0.00 - 11 missed
+      67 exception(s) covering ₹50,20,195.68, exception recall 1.0000 over 30
       - 35 unmatchable (the honest floor)
       llm: disabled (no provider key in $LEDGERLOOP_LLM_API_KEY or any of
       $GEMINI_API_KEY, $GROQ_API_KEY, $OLLAMA_API_KEY, $OPENROUTER_API_KEY);
@@ -106,11 +106,16 @@ LedgerLoop demo
 </details>
 
 Those figures are the single-seed ones for `test` seed 42. The claims in
-`README.md` are the five-seed means beside them — recall 0.8049 ± 0.0792, match
-rate 0.7711 ± 0.0861, exception recall 0.9818 ± 0.0250 — because a single run's
-number is noise. Seed 42's exception recall of 30/30 rests on thirty records and
-its 95% Wilson interval is [0.8865, 1.0000]; `EVALUATION.md` reports that as
-*undecided against the ≥ 0.95 target*, not as a pass.
+`README.md` are the five-seed means beside them — recall 0.8844 ± 0.0788, match
+rate 0.8533 ± 0.0810, exception recall 0.9818 ± 0.0250 — because a single run's
+number is noise.
+
+Two of those numbers are worth reading with their intervals. Seed 42's match
+rate of 0.9159 has a 95% Wilson lower bound of 0.8819, which **clears** the
+≥ 0.85 target on the interval and not merely on the point estimate. Its
+exception recall of 30/30 rests on thirty records with an interval of
+[0.8865, 1.0000], and `EVALUATION.md` reports that as *undecided against the
+≥ 0.95 target* rather than as a pass — the same rule, cutting the other way.
 
 `--no-ui` stops after the reconciliation and prints the UI command instead of
 launching it. `--split dev` runs the 60-order corpus.
@@ -119,8 +124,9 @@ launching it. `--split dev` runs the 60-order corpus.
 
 1. **Results** — precision with its Wilson interval, the money view, the tier
    waterfall, and per-class recall *including the classes that score badly*
-   (`A09_SPLIT_PAYOUT` at 0.34 is the row to look at: it is the whole of the
-   remaining recall gap).
+   (`A09_SPLIT_PAYOUT` at 0.74 is the row to look at: the remaining gap is one
+   settlement whose payments do not partition uniquely across its two tranches,
+   which the system refuses rather than guesses).
 2. **Exceptions** — sorted by rupee impact descending. Open the largest one: it
    carries a class, a severity, a price, an evidence chain pointing back at
    source records, and a suggested action.
@@ -202,7 +208,8 @@ python -m ledgerloop.cli baseline-llm --data data/generated/dev-standard-42 \
     --calibration reports/calibration.json --cold --offline-provider \
     --out reports/llm_baseline.json
 python -m ledgerloop.cli comparison --data data/generated/test-{easy,standard,hard}-4{2,3,4,5,6} \
-    --calibration reports/calibration.json --out reports/comparison.json
+    --calibration reports/calibration.json --switch split-completion \
+    --out reports/comparison.json
 python -m ledgerloop.cli llm-report --data data/generated/test-standard-42 \
     --calibration reports/calibration.json --offline-provider \
     --cache-dir reports/llm_cache_report --out reports/llm_report.json
@@ -213,10 +220,12 @@ python -m ledgerloop.cli eval --data data/generated/test-standard-42 \
     --out EVALUATION.md
 ```
 
-`comparison` is the before/after study for the one change Phase 2.3 made to the
-reconciliation system: it runs all fifteen corpora **twice**, once with the
-duplicate-posting pass and once without, and writes both arms with their tuning
-hashes. `llm-report` runs the production LLM path once with a `--no-llm` control
+`comparison` is the before/after study for a change to the reconciliation
+system: it runs all fifteen corpora **twice**, once with the change and once
+without, and writes both arms with their tuning hashes. `--switch` picks which
+change — `split-completion` (the default, and the most recent) or `duplicates`
+— from a fixed list rather than an arbitrary configuration, so the artefact
+means the same thing however it was invoked. `llm-report` runs the production LLM path once with a `--no-llm` control
 over the same corpus, so "the model proposes, deterministic code decides" is
 measured rather than asserted. Drop `--offline-provider` on a machine with a
 provider key and the same command produces a live measurement.
@@ -238,10 +247,14 @@ It reads whatever is already in `reports/runs/`. Point it elsewhere with
 ## 4. Verifying the build
 
 ```bash
-python -m pytest          # 2292 passed
+python -m pytest          # 2342 passed
 python -m ruff check .    # All checks passed!
 python -m mypy            # Success: no issues found in 99 source files
 ```
+
+These are the same three commands `.github/workflows/ci.yml` runs on every push
+and pull request, against the same `pyproject.toml` — the workflow passes no
+flags of its own, so there is no second configuration to drift.
 
 > **If `mypy` fails to start** with `ImportError: DLL load failed while importing
 > ..._mypyc`, an Application Control policy is blocking the compiled binary. Run

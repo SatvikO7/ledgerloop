@@ -1556,18 +1556,23 @@ def _comparison_section(artifact: ComparisonArtifact | None) -> list[str]:
         return []
 
     lines = [
-        "## Before and after (Phase 2.3)",
+        "## Before and after",
         "",
         f"**What changed:** {artifact.change}.",
         "",
         f"Both arms ran over the **same** corpora -- `{artifact.split}`, seeds "
         + ", ".join(str(seed) for seed in artifact.seeds)
         + ", three difficulties -- with the same fitted bundle and the same full",
-        "ladder. The only field that differs is `RunConfig.duplicates.enabled`, and",
-        "each arm's `tuning_hash` is printed so that claim is a check rather than a",
-        "sentence. Deltas are differences of means over five seeds, not significance",
-        "tests: five paired runs of a deterministic system are enough for a spread and",
-        "not enough for an inference.",
+        "ladder. **Exactly one `RunConfig` field differs between them**, and each arm's",
+        "`tuning_hash` is printed below so that claim is a check rather than a sentence.",
+        "Deltas are differences of means over five seeds, not significance tests: five",
+        "paired runs of a deterministic system are enough for a spread and not enough",
+        "for an inference.",
+        "",
+        "A change that is *not* switchable does not appear here. A correctness fix has",
+        "no defensible second arm -- a flag for a bug is an invitation to run the buggy",
+        "one -- so its effect is measured against the previous commit and reported per",
+        "seed in the step notes instead.",
         "",
     ]
 
@@ -1625,12 +1630,13 @@ def _comparison_section(artifact: ComparisonArtifact | None) -> list[str]:
         )
     lines.extend(
         [
-            "The change is a **statement-hygiene pass**, not a loosened threshold: no",
-            "tolerance, gate or threshold moved, and the pass's own two knobs can only",
-            "be turned towards asserting *less* (`ledgerloop.matching.duplicates`).",
-            "Switching it off reproduces every pre-Phase-2 number to the digit, which",
+            "Neither change here is a loosened threshold. No tolerance, gate or",
+            "threshold moved for either, and both passes' own knobs can only be turned",
+            "towards asserting *less* -- the duplicate pass declines more as its window",
+            "narrows, and split completion targets the net **exactly**, with no band at",
+            "all. Switching either off reproduces its era's numbers to the digit, which",
             "`tests/unit/test_metrics_regression.py` asserts exactly rather than",
-            "approximately.",
+            "approximately, over three pinned arms.",
             "",
         ]
     )

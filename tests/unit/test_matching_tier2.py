@@ -13,6 +13,8 @@ it is allowed to see, not of what it happens to emit.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from ledgerloop.config import MatchingTolerances
@@ -606,3 +608,104 @@ class TestTheGreedyFallbackInPlace:
         assert outcome.settlements_resolved == 0
         assert outcome.settlements_unsolved == 1
         assert context.consumed_settlements == set()
+
+
+class TestTheAllocationDenominatorIsTheBucket:
+    """A charged-back payment must leave the denominator as well as the subset.
+
+    `payment_bucket` drops a payment a negative adjustment identifies as charged
+    back -- its money never reached the bank, so it belongs to no tranche. Until
+    Phase 2.5 the allocation that *sizes* the tranches still divided by the gross
+    of **every** nested payment, so each tranche came out short by its share of
+    money that was never paid, and a batch that was both split (A09) and charged
+    back (A08) was refused for arithmetic that could not close.
+
+    A batch with no claw-back is unaffected: the two denominators are equal, and
+    `TestAgainstTheFixture` and the ablation pins elsewhere in this suite are
+    what say so.
+    """
+
+    def _split_with_a_chargeback(self):
+        """120,000 gross, one 20,000 payment charged back, 100,000 paid in two.
+
+        The declared net is 100,000 (gross 120,000, adjustment -20,000) and the
+        surviving payments are 60,000 and 40,000, whose bucket gross is exactly
+        100,000 -- so the tranches are 60,000 and 40,000.
+
+        The old denominator divided by the **batch** gross of 120,000 and
+        predicted ``allocate(100000, [60000, 60000])[0]`` = 50,000 for the first
+        tranche against an actual 60,000: out by 10,000, far outside epsilon, so
+        the batch was refused.
+        """
+        only = batch(
+            amounts=(60_000, 40_000, 20_000),
+            adjustments_minor=-20_000,
+            first_index=1,
+        )
+        first = bank_credit("BNK-00001", amount_minor=60_000, utr=only.settlement.utr)
+        second = bank_credit(
+            "BNK-00002",
+            amount_minor=40_000,
+            utr=only.settlement.utr,
+            value_date=only.settlement.settled_on + timedelta(days=2),
+        )
+        return only, corpus(batches=[only], bank_txns=[first, second])
+
+    def test_a_split_batch_with_a_chargeback_now_resolves(self):
+        _only, sources = self._split_with_a_chargeback()
+        outcome = _t2(sources)
+        assert outcome.settlements_resolved == 1
+        assert outcome.credits_matched == 2
+
+    def test_the_charged_back_payment_is_in_no_tranche(self):
+        """It is excluded from the subset *and* from the denominator, which are
+        the same fact stated twice -- money that did not arrive cannot be part
+        of a tranche and cannot size one either."""
+        _only, sources = self._split_with_a_chargeback()
+        outcome = _t2(sources)
+        assigned = {
+            c.source_ref.record_id for c in outcome.candidates if c.is_evaluable
+        }
+        assert assigned == {"PAY-00001", "PAY-00002"}
+        assert "PAY-00003" not in assigned
+
+    def test_every_tranche_it_asserts_is_arithmetic_verified(self):
+        _only, sources = self._split_with_a_chargeback()
+        outcome = _t2(sources)
+        assert outcome.candidates
+        assert all(c.arithmetic_verified for c in outcome.candidates)
+
+    def test_a_batch_without_a_chargeback_is_unaffected(self):
+        """The two denominators coincide, so nothing about the ordinary case
+        changed. This is the control for the test above."""
+        only = batch(amounts=(60_000, 40_000))
+        first = bank_credit("BNK-00001", amount_minor=60_000, utr=only.settlement.utr)
+        second = bank_credit(
+            "BNK-00002",
+            amount_minor=40_000,
+            utr=only.settlement.utr,
+            value_date=only.settlement.settled_on + timedelta(days=2),
+        )
+        outcome = _t2(corpus(batches=[only], bank_txns=[first, second]))
+        assert outcome.settlements_resolved == 1
+        assert _pairs(outcome.candidates) == {
+            ("payment:PAY-00001", "bank_txn:BNK-00001"),
+            ("payment:PAY-00002", "bank_txn:BNK-00002"),
+        }
+
+    def test_tranches_that_do_not_reach_the_declared_net_are_still_refused(self):
+        """The fix corrects a denominator; it does not widen a tolerance."""
+        only = batch(
+            amounts=(60_000, 40_000, 20_000),
+            adjustments_minor=-20_000,
+            first_index=1,
+        )
+        first = bank_credit("BNK-00001", amount_minor=60_000, utr=only.settlement.utr)
+        short = bank_credit(
+            "BNK-00002",
+            amount_minor=25_000,
+            utr=only.settlement.utr,
+            value_date=only.settlement.settled_on + timedelta(days=2),
+        )
+        outcome = _t2(corpus(batches=[only], bank_txns=[first, short]))
+        assert outcome.settlements_resolved == 0

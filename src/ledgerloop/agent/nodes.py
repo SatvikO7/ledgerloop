@@ -56,6 +56,7 @@ from ledgerloop.matching.harvest import harvest
 from ledgerloop.matching.pipeline import (
     adjudicate_residual,
     close_ladder,
+    complete_splits,
     open_ladder,
     run_residual_pass,
     should_run_residual_pass,
@@ -68,6 +69,7 @@ __all__ = [
     "build_entity_graph",
     "calibrate_and_decide",
     "classify_exceptions_node",
+    "complete_splits_node",
     "explain_exceptions",
     "generate_report",
     "ingest_sources",
@@ -89,6 +91,7 @@ NODE_SEQUENCE: tuple[str, ...] = (
     "normalize_records",
     "build_entity_graph",
     "tier_ladder",
+    "complete_splits",
     "llm_adjudicate",
     "calibrate_and_decide",
     "classify_exceptions",
@@ -292,6 +295,53 @@ def should_loop(state: GraphState) -> str:
     if ladder is None:  # pragma: no cover - build_entity_graph always sets it
         return "llm_adjudicate"
     return "tier_ladder" if should_run_residual_pass(ladder) else "llm_adjudicate"
+
+
+def complete_splits_node(state: GraphState, resources: RunResources) -> GraphState:
+    """Stage 2b: the split payouts the residual loop could not reach.
+
+    Its own node rather than a line inside ``llm_adjudicate``, because it is the
+    last thing the *deterministic* ladder does and the audit trail should say so
+    -- a reader stepping a record through the replay must be able to see that a
+    tranche was resolved here and not by the model.
+
+    Placed exactly where the direct path puts it: after the loop's exit edge and
+    before T5. That ordering is load-bearing (see
+    :func:`~ledgerloop.matching.pipeline.complete_splits`) -- inside the loop the
+    pass races tiers that are still consuming credits, and its uniqueness test
+    then fails on batches it could resolve once the pool settles.
+
+    Calls the same function the chain calls. Nothing is computed here.
+    """
+    del resources
+    log = _log(state)
+    started = _entered(log, "complete_splits")
+    ladder = state["ladder"]
+    complete_splits(ladder)
+
+    outcome = ladder.split_completion
+    _completed(
+        log,
+        "complete_splits",
+        started,
+        message=(
+            f"{outcome.settlements_resolved} of {outcome.settlements_seen} "
+            f"split payout(s) completed across {outcome.credits_matched} tranche(s)"
+        ),
+        settlements_seen=outcome.settlements_seen,
+        settlements_resolved=outcome.settlements_resolved,
+        settlements_refused=outcome.settlements_ambiguous + outcome.settlements_unsolved,
+        credits_matched=outcome.credits_matched,
+        payments_matched=outcome.payments_matched,
+    )
+    # A node returns the state *fragment* it produced, not the state it was
+    # given: LangGraph reduces `node_log` and `audit` by appending, so returning
+    # the input would drop this node's own events on the floor.
+    return GraphState(
+        ladder=ladder,
+        node_log=["complete_splits"],
+        audit=list(log.events),
+    )
 
 
 def llm_adjudicate(state: GraphState, resources: RunResources) -> GraphState:

@@ -482,10 +482,20 @@ def classify_credit(item: CreditItem) -> ExceptionClass:
     if item.reposting_of is not None:
         return ExceptionClass.DUPLICATE_CREDIT
 
-    # 1. The same reference on more than one credit, one of which was matched.
+    # 1. The same reference on more than one credit **for the same amount**.
     #    A05: the money arrived twice and only one arrival is real.
+    #
+    #    The amount test is what separates A05 from A09. Two credits sharing a
+    #    reference are duplicates only if they are *copies*; where they carry
+    #    different amounts they are tranches of one payout that was split, and
+    #    calling those "the same payout twice" tells a controller to chase a
+    #    reversal that does not exist. Found in Phase 2.5 on the one settlement
+    #    the ladder still refuses -- its two tranches differ by Rs 52,543.57 and
+    #    were both being reported as duplicates of each other.
     if item.keyed_settlements and item.twin_credits:
-        return ExceptionClass.DUPLICATE_CREDIT
+        if any(other.credit_minor == credit.credit_minor for other in item.twin_credits):
+            return ExceptionClass.DUPLICATE_CREDIT
+        return ExceptionClass.SPLIT_PAYOUT_INCOMPLETE
 
     # 2. A reference that names a settlement nobody credited. The pair exists in
     #    the sources; something about the amount or the date stopped the match.

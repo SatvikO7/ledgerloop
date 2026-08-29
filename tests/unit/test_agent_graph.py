@@ -77,7 +77,11 @@ class TestTopology:
         decoration."""
         pairs = {(source, target) for source, target, _ in GRAPH_EDGES}
         assert ("tier_ladder", "tier_ladder") in pairs
-        assert ("tier_ladder", "llm_adjudicate") in pairs
+        # The loop's exit lands on `complete_splits` from Phase 2.5 -- the last
+        # deterministic stage -- and reaches T5 from there. Both edges are still
+        # required; only the exit's target moved.
+        assert ("tier_ladder", "complete_splits") in pairs
+        assert ("complete_splits", "llm_adjudicate") in pairs
 
     def test_the_conditional_branch_out_of_build_entity_graph_exists(self):
         conditions = {
