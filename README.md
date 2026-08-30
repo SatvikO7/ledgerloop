@@ -90,7 +90,7 @@ extra item.
    exceptions.json · decisions.json
            │
            ▼
-   ui/  four screens: Run · Results · Exceptions · Audit replay
+   ui/  six sections: Overview · Pipeline · Exceptions · Evidence · Evaluation · Run
         reads the four files; computes nothing
 ```
 
@@ -246,12 +246,20 @@ contain. `--split dev` runs the 60-order corpus instead — it still clears the 
 50+ record bar and is faster, but its exception recall rests on five records and means very
 little.
 
-| Screen | What it shows |
+| Section | What it shows |
 |---|---|
-| **Run** | generate or pick a dataset, apply the fitted bundle, reconcile |
-| **Results** | precision with its Wilson interval, match rate, recall, exception recall, ₹ reconciled against ₹ outstanding, the tier waterfall, per-class recall |
+| **Overview** | the four headline proportions as cards, each with its sample, its 95% Wilson interval drawn to scale and a *met / missed / undecided* verdict; then the four decision outcomes, then the money |
+| **Pipeline** | the ladder as a flow, T0 → T5, each rung with what it proposed, what it committed and what it refused — including the rungs that contributed nothing |
 | **Exceptions** | the queue sorted by ₹ impact, each row with a class, a severity, a price, an evidence chain and a suggested action |
-| **Audit replay** | step any record through the tiers: which one proposed it, what it scored, what the policy returned, and why |
+| **Evidence** | one record taken apart: source records → normalisation → candidate → tier → arithmetic verification → decision |
+| **Evaluation** | the same table `EVALUATION.md` publishes, verdicts included, plus per-class recall |
+| **Run** | generate or pick a dataset, apply the fitted bundle, reconcile |
+
+The verdict pills come from `Proportion.verdict` — **the same call the report writer
+makes**, so the dashboard cannot reach a ruling `EVALUATION.md` would not. On `test` seed 42
+that means precision reads *undecided* against its ≥ 99% target, because the lower bound of
+[98.66%, 100.00%] does not clear it. A dashboard willing to print a green tick there would
+be the more flattering and the less honest one.
 
 `AUTO_MATCHED`, `NEEDS_REVIEW`, `EXCEPTION` and `REJECTED` are always four separate
 figures. Unresolved exceptions are shown as unresolved, and the `UNMATCHABLE` floor is

@@ -67,13 +67,33 @@ class TestTheScriptRuns:
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
         assert not test.exception
-        assert test.title[0].value == "LedgerLoop"
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "LedgerLoop" in markdown
+        assert "Confidence-aware payment reconciliation" in markdown
 
-    def test_it_shows_the_four_tabs(self, workspace, monkeypatch):
+    def test_the_masthead_names_the_run_on_screen(self, workspace, monkeypatch):
+        """The hero is the only place a reader learns which run they are
+        looking at, so it must carry the run id and the corpus."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "app-run" in markdown
+        assert "records" in markdown
+
+    def test_it_shows_the_six_sections(self, workspace, monkeypatch):
+        """The information architecture, in the order the story is told:
+        the answer, then how it was reached, then the work it leaves."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
         labels = [tab.label for tab in test.tabs]
-        assert labels == ["Run", "Results", "Exceptions", "Audit replay"]
+        assert labels == [
+            "Overview",
+            "Pipeline",
+            "Exceptions",
+            "Evidence",
+            "Evaluation",
+            "Run",
+        ]
 
     def test_it_lists_the_completed_run(self, workspace, monkeypatch):
         corpus, runs = workspace
@@ -94,26 +114,48 @@ class TestTheScriptRuns:
 
 
 class TestTheResultsScreen:
-    def test_it_shows_the_headline_three(self, workspace, monkeypatch):
+    def test_it_shows_all_four_headline_proportions(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        labels = [metric.label for metric in test.metric]
-        for expected in (
-            "Auto-match precision",
-            "Match rate",
-            "Link recall",
-            "Exception recall",
-        ):
-            assert expected in labels
+        markdown = " ".join(item.value for item in test.markdown)
+        for expected in ("Precision", "Recall", "Match rate", "Exception recall"):
+            assert expected in markdown
+
+    def test_no_proportion_is_rendered_without_its_interval(
+        self, workspace, monkeypatch
+    ):
+        """The project's own standard, applied to the dashboard. A point
+        estimate with nothing beside it is the omission `Proportion` exists to
+        make unavailable, and a KPI card must not reintroduce it."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert markdown.count("95% CI") >= 4
+        # A real interval, not the "no sample" placeholder: this run measured
+        # every headline proportion, so each card must show actual bounds.
+        assert "no sample" not in markdown
+        assert markdown.count("of ") >= 4
+
+    def test_every_headline_carries_a_verdict(self, workspace, monkeypatch):
+        """met / missed / undecided / reported -- the ruling comes from
+        `Proportion.verdict`, so the dashboard cannot reach one the report
+        would not."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert any(
+            word in markdown
+            for word in ("target met", "target missed", "undecided", "reported")
+        )
 
     def test_it_shows_every_decision_outcome_separately(self, workspace, monkeypatch):
         """AUTO_MATCHED, NEEDS_REVIEW, EXCEPTION and REJECTED are four figures.
         A single 'matched' number would be the most misleading thing here."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        labels = [metric.label for metric in test.metric]
+        markdown = " ".join(item.value for item in test.markdown)
         for outcome in ("AUTO_MATCHED", "NEEDS_REVIEW", "EXCEPTION", "REJECTED"):
-            assert outcome in labels
+            assert outcome in markdown
 
     def test_a_clean_run_reports_zero_false_positives_rather_than_silence(
         self, workspace, monkeypatch
@@ -191,6 +233,143 @@ class TestTheAuditScreen:
         test = _app(monkeypatch, runs, corpus.parent).run()
         captions = " ".join(item.value for item in test.caption)
         assert "nothing here is re-derived" in captions
+
+
+class TestThePipelineScreen:
+    """The tier ladder as a flow, including the rungs that found nothing."""
+
+    def test_it_draws_every_rung_of_the_ladder(self, workspace, monkeypatch):
+        """All six, always. A ladder rendered only from the rows a run happened
+        to produce would silently drop the tier that contributed nothing --
+        which is the one a reader most needs to see."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        for rung in ("T0", "T1", "T2", "T3", "T4", "T5"):
+            assert rung in markdown
+        for label in ("Exact", "Tolerance", "Aggregation", "Lexical", "Graph", "LLM"):
+            assert label in markdown
+
+    def test_a_rung_that_found_nothing_says_so_honestly(self, workspace, monkeypatch):
+        """T4 runs on every corpus and contributes zero. The dashboard has to
+        say that plainly -- not as an error, and not by hiding the rung."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "found nothing" in markdown
+        notes = " ".join(item.value for item in test.info)
+        assert "measurement, not an error" in notes
+
+    def test_it_separates_yield_from_conviction(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "proposed" in markdown
+        assert "refused" in markdown
+
+
+class TestTheEvidenceScreen:
+    def test_it_walks_the_chain_for_a_non_developer(self, workspace, monkeypatch):
+        """Source records -> normalisation -> candidate -> tier -> arithmetic
+        -> decision. Someone who has never seen the code should be able to
+        follow why one record ended up where it did."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        for step in (
+            "Source records",
+            "Normalisation",
+            "Candidate",
+            "Tier",
+            "Arithmetic verification",
+            "Decision",
+        ):
+            assert step in markdown
+
+    def test_the_chain_states_the_money_discipline(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "integer paise" in markdown
+
+
+class TestTheEvaluationScreen:
+    def test_it_publishes_the_bad_rows_too(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        captions = " ".join(item.value for item in test.caption)
+        assert "including the classes that score badly" in captions
+
+    def test_it_names_the_weakest_anomaly_class(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        captions = " ".join(item.value for item in test.caption)
+        assert "Weakest class on this run" in captions
+
+    def test_it_reports_the_confusion_counts(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        for label in ("True positives", "False positives", "False negatives"):
+            assert label in markdown
+
+
+class TestNothingIsHardcoded:
+    """Every figure on screen has to come from the run record.
+
+    The check is a substitution: change a number in the stored run and the
+    dashboard must change with it. A hardcoded metric would survive the edit.
+    """
+
+    def test_the_headline_follows_the_stored_run(self, workspace, monkeypatch, tmp_path):
+        import json
+        import shutil
+
+        corpus, runs = workspace
+        edited = tmp_path / "edited-runs"
+        shutil.copytree(runs, edited)
+        record = next(edited.glob("*/run.json"))
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        payload["metrics"]["intervals"]["precision_interval"] = {
+            "successes": 3,
+            "trials": 4,
+            "value": 0.75,
+            "ci_low": 0.3,
+            "ci_high": 0.95,
+        }
+        payload["metrics"]["false_positives"] = 7
+        record.write_text(json.dumps(payload), encoding="utf-8")
+
+        test = _app(monkeypatch, edited, corpus.parent).run()
+        assert not test.exception
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "75.00%" in markdown
+        assert "3 of 4" in markdown
+        errors = " ".join(item.value for item in test.error)
+        assert "7 false positive(s)" in errors
+
+    def test_a_run_without_stored_intervals_says_so(
+        self, workspace, monkeypatch, tmp_path
+    ):
+        """An older record predates the stored intervals. That renders as
+        *not measured*, never as 0.00% -- the same rule the report applies."""
+        import json
+        import shutil
+
+        corpus, runs = workspace
+        edited = tmp_path / "legacy-runs"
+        shutil.copytree(runs, edited)
+        record = next(edited.glob("*/run.json"))
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        payload["metrics"].pop("intervals", None)
+        record.write_text(json.dumps(payload), encoding="utf-8")
+
+        test = _app(monkeypatch, edited, corpus.parent).run()
+        assert not test.exception
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "not measured" in markdown
+        assert "n/a" in markdown
+        assert any("predates stored intervals" in item.value for item in test.info)
 
 
 class TestTheRunScreen:

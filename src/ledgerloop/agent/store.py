@@ -47,6 +47,7 @@ from ledgerloop.eval.harness import SystemRun
 from ledgerloop.models.audit import AuditEvent
 from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, LinkType
+from ledgerloop.models.metrics import METRIC_TARGETS
 from ledgerloop.models.recon_exception import ReconException
 
 __all__ = [
@@ -171,6 +172,21 @@ def _summary(run: SystemRun, log: AuditLog) -> dict[str, Any]:
             "unmatchable_impact_minor": metrics.unmatchable_impact_minor,
             "records_per_second": metrics.records_per_second,
             "wall_clock_ms": run.matched.wall_clock_ms,
+            # Phase 2.7. The headline proportions with their sample sizes and
+            # 95% Wilson intervals, written whole rather than as loose floats.
+            #
+            # The dashboard shows an interval and a verdict beside every
+            # headline number, and the only alternative to persisting them is
+            # recomputing them in the view -- the one thing the UI is not
+            # allowed to do. `Proportion` refuses to exist without its numerator
+            # and denominator, so storing it whole carries that guarantee across
+            # the file boundary: a reader of run.json can re-derive every
+            # interval here rather than taking the bounds on trust.
+            "intervals": {
+                name: proportion.model_dump()
+                for name in METRIC_TARGETS
+                if (proportion := getattr(metrics, name, None)) is not None
+            },
         },
         "recall_by_anomaly_class": {
             anomaly.value: value

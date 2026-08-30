@@ -75,7 +75,7 @@ LedgerLoop demo
   1. generate    three heterogeneous sources plus link-level ground truth
   2. calibrate   fit the blender and tau_high on train + calibration
   3. reconcile   run the LangGraph pipeline over the demo corpus
-  4. inspect     open the four screens
+  4. inspect     open the dashboard
 
 [1/4] generating corpora
       10 generated, 0 already present (generation is a pure function of the
@@ -100,7 +100,7 @@ LedgerLoop demo
       every number above is deterministic
       wrote reports/runs/t0t4-test-42
 
-[4/4] the four screens
+[4/4] the dashboard
       opening Streamlit. Ctrl-C to stop.
 ```
 </details>
@@ -122,17 +122,26 @@ launching it. `--split dev` runs the 60-order corpus.
 
 ### What to look at, in order
 
-1. **Results** — precision with its Wilson interval, the money view, the tier
-   waterfall, and per-class recall *including the classes that score badly*
+1. **Overview** — the four headline proportions as cards. Each carries its
+   sample, its 95% Wilson interval drawn to scale, and a verdict. Precision
+   reads *undecided* rather than green: 283 of 283 gives [98.66%, 100.00%], and
+   the lower bound does not clear the ≥ 99% target. That is the same ruling
+   `EVALUATION.md` prints, from the same call.
+2. **Pipeline** — the ladder as a flow. **T4 Graph shows 0 and says why**: it
+   ran, it found nothing, and the panel explains that every earlier rung matches
+   at settlement granularity so the partial assignments graph inference exists
+   to finish never arise. T5 is drawn differently again — dashed, *did not run* —
+   because a rung that never executed has no result rather than a zero.
+3. **Exceptions** — sorted by rupee impact descending. Open the largest one: it
+   carries a class, a severity, a price, an evidence chain pointing back at
+   source records, and a suggested action.
+4. **Evidence** — pick any record and follow it: source records → normalisation
+   → candidate → tier → arithmetic verification → decision.
+5. **Evaluation** — per-class recall *including the classes that score badly*
    (`A09_SPLIT_PAYOUT` at 0.74 is the row to look at: the remaining gap is one
    settlement whose payments do not partition uniquely across its two tranches,
    which the system refuses rather than guesses).
-2. **Exceptions** — sorted by rupee impact descending. Open the largest one: it
-   carries a class, a severity, a price, an evidence chain pointing back at
-   source records, and a suggested action.
-3. **Audit replay** — pick any record and see which tier proposed it, what the
-   blender scored it, what the policy returned, and why.
-4. **Run** — reconcile any other corpus on disk, including the 300-order `test`
+6. **Run** — reconcile any other corpus on disk, including the 300-order `test`
    split.
 
 ---
@@ -355,7 +364,7 @@ gateway and a React UI. All four were cut before implementation, and the
 reasoning is in `ARCHITECTURE.md` §5 — Neo4j because the fallback was required
 to produce *identical* decisions (which concedes the database buys no decision
 quality), ChromaDB because embeddings are weak on vowel-dropped abbreviations,
-and React because the four screens are tables and a form.
+and React because the dashboard is one stylesheet over a finished run.
 
 What is left is **one Python process with no services**, so Compose would have
 nothing to orchestrate: it would wrap `pip install` in a container and call that

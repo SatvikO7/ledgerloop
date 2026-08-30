@@ -64,7 +64,13 @@ from ledgerloop.eval.reliability import CalibrationEvaluation
 from ledgerloop.eval.summary import Aggregate
 from ledgerloop.eval.truth_io import DatasetManifest
 from ledgerloop.matching.calibration import CalibrationBundle, ReliabilityDiagram
-from ledgerloop.models.metrics import CostLedger, Proportion, RunMetrics
+from ledgerloop.models.metrics import (
+    METRIC_TARGETS,
+    CostLedger,
+    Proportion,
+    RunMetrics,
+    Verdict,
+)
 from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.models.resolution import AutoResolution
 from ledgerloop.models.truth import GroundTruth
@@ -298,21 +304,31 @@ _HEADLINE_TARGETS: tuple[tuple[str, str, float | None, str], ...] = (
     (
         "Auto-match precision",
         "precision_interval",
-        0.99,
+        METRIC_TARGETS["precision_interval"],
         "this system asserted no links",
     ),
-    ("Link recall", "recall_interval", None, "this corpus has no evaluation links"),
-    ("Match rate", "match_rate_interval", 0.85, "no reconcilable records"),
+    (
+        "Link recall",
+        "recall_interval",
+        METRIC_TARGETS["recall_interval"],
+        "this corpus has no evaluation links",
+    ),
+    (
+        "Match rate",
+        "match_rate_interval",
+        METRIC_TARGETS["match_rate_interval"],
+        "no reconcilable records",
+    ),
     (
         "Exception recall",
         "exception_recall_interval",
-        0.95,
+        METRIC_TARGETS["exception_recall_interval"],
         "this system raises no exceptions",
     ),
     (
         "Unmatchable coverage",
         "unmatchable_coverage_interval",
-        None,
+        METRIC_TARGETS["unmatchable_coverage_interval"],
         "no unmatchable records in this corpus",
     ),
 )
@@ -353,6 +369,10 @@ def _headline_rows(metrics: RunMetrics) -> list[str]:
 def _verdict(proportion: Proportion, target: float | None) -> str:
     """Met, missed, or a sample too small to tell the two apart.
 
+    The ruling comes from :meth:`~ledgerloop.models.metrics.Proportion.verdict`;
+    what is left here is this document's prose for it. The dashboard renders the
+    same ruling in its own words, and neither can invent a fourth answer.
+
     Every target in this project is a floor (``>= x``), so the verdict is read
     off the **interval**, one-sided:
 
@@ -367,13 +387,12 @@ def _verdict(proportion: Proportion, target: float | None) -> str:
     statement about the same denominator. Reporting an undecided result as a pass
     would be the more flattering error and it is the same error.
     """
-    if target is None:
+    ruling = proportion.verdict(target)
+    if ruling is Verdict.UNTARGETED:
         return "reported, not targeted"
-    if proportion.ci_low >= target:
-        return "met"
-    if proportion.ci_high < target:
-        return "missed"
-    return f"undecided at n={proportion.trials} -- the interval straddles the target"
+    if ruling is Verdict.UNDECIDED:
+        return f"undecided at n={proportion.trials} -- the interval straddles the target"
+    return ruling.value
 
 
 def _calibration_cell(metrics: RunMetrics) -> str:

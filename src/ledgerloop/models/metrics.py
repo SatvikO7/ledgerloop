@@ -31,6 +31,8 @@ re-derive it, and a proportion can never be reported without its sample size.
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from pydantic import Field
 
 from ledgerloop.models.base import FrozenLedgerModel, LedgerModel, MinorUnits
@@ -43,7 +45,44 @@ __all__ = [
     "Proportion",
     "RunMetrics",
     "TierContribution",
+    "Verdict",
 ]
+
+
+class Verdict(StrEnum):
+    """Whether a proportion clears a floor, read off its interval.
+
+    Every target in this project is a floor (``>= x``), so the reading is
+    one-sided and there are three answers rather than two. The third is the
+    one this exists for: a sample can be too small to separate a pass from a
+    failure, and saying so is the honest report.
+
+    It lives beside :class:`Proportion` rather than in the report writer
+    because two renderers now need it -- ``EVALUATION.md`` and the dashboard --
+    and a verdict rule stated twice is a verdict rule that can disagree with
+    itself. The prose differs between them; the ruling does not.
+    """
+
+    MET = "met"
+    MISSED = "missed"
+    UNDECIDED = "undecided"
+    UNTARGETED = "untargeted"
+    """Reported, with no floor to clear. Not a pass and not a failure."""
+
+
+#: The floors the headline proportions are judged against, by field name.
+#:
+#: Data rather than literals so the report and the dashboard cannot drift, and
+#: ``None`` is a deliberate entry rather than an absence: link recall and
+#: unmatchable coverage are *reported and not targeted*, which is a different
+#: statement from having a target nobody wrote down.
+METRIC_TARGETS: dict[str, float | None] = {
+    "precision_interval": 0.99,
+    "recall_interval": None,
+    "match_rate_interval": 0.85,
+    "exception_recall_interval": 0.95,
+    "unmatchable_coverage_interval": None,
+}
 
 
 class Proportion(FrozenLedgerModel):
@@ -83,6 +122,31 @@ class Proportion(FrozenLedgerModel):
     @property
     def width(self) -> float:
         return self.ci_high - self.ci_low
+
+    def verdict(self, target: float | None) -> Verdict:
+        """Met, missed, or a sample too small to tell the two apart.
+
+        Read off the **interval**, one-sided, because every target here is a
+        floor:
+
+        * ``MET`` -- the lower bound clears the target. The data supports it.
+        * ``MISSED`` -- the upper bound is below it. The data rules it out.
+        * ``UNDECIDED`` -- the interval straddles it, so the sample cannot
+          separate the two.
+
+        The third cuts both ways, which is the point. Exception recall at 30 of
+        30 does not *demonstrate* >= 95% from thirty records, and 0.9333 from
+        the same thirty is not a clean miss -- both are the same statement about
+        the same denominator, and reporting the flattering one as a pass is the
+        same error as reporting the other as a failure.
+        """
+        if target is None:
+            return Verdict.UNTARGETED
+        if self.ci_low >= target:
+            return Verdict.MET
+        if self.ci_high < target:
+            return Verdict.MISSED
+        return Verdict.UNDECIDED
 
     def covers(self, target: float) -> bool:
         """Whether ``target`` lies inside the interval.

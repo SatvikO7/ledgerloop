@@ -13,8 +13,11 @@ only refusals, and a refusal is what stops the other two overfilling a credit.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+import ledgerloop.matching.pipeline as pipeline
 from ledgerloop.config import DecisionThresholds, GraphInference, MatchingTolerances
 from ledgerloop.graph.interface import GraphRepo
 from ledgerloop.graph.memory_repo import MemoryGraphRepo
@@ -460,3 +463,186 @@ class TestReportingSurfaceAndExclusivityBlocks:
         outcome = run_tier4(context, premises, GRAPH, THRESHOLDS)
         assert outcome.inferences_blocked == 1
         assert outcome.candidates == ()
+
+
+class TestWhyItContributesZero:
+    """The structural reason, asserted rather than observed.
+
+    ``ARCHITECTURE.md`` decision 31 reports that T4 fires zero times and gives
+    the reason: every earlier tier matches at *settlement* granularity, so it
+    establishes the settlement-to-credit edge and expands the whole batch in one
+    go. Path closure and sibling completion both need a settlement that is
+    **partly** assigned, and no such state is ever produced.
+
+    Phase 2.7 measured that claim instead of restating it. Across all 29 corpora
+    on disk, and again on a 5,000-order corpus, every settlement the pipeline
+    hands T4 is either fully linked or not linked at all -- 1228 fully linked
+    against 242 untouched at 300 orders, 762 against 142 at 5,000, and **zero
+    partial in either**. The tests below pin the invariant rather than the
+    counts, so they stay true on any corpus while still failing the moment a
+    tier starts leaving a batch half-assigned.
+
+    That failure would be *good news*: it is precisely the situation T4 was
+    built for, and the tier would begin contributing on its own.
+    """
+
+    @staticmethod
+    def _fixture() -> Path:
+        return Path(__file__).resolve().parents[2] / "data" / "fixtures" / "dev-standard-42"
+
+    def _premise_state(self) -> list[tuple[int, int, int]]:
+        """(payments covered, payments linked, settlement-credit premises) per settlement."""
+        from ledgerloop.eval.harness import run_system
+        from ledgerloop.matching.tier4_graph import _covered_payments
+
+        captured: list[tuple[object, tuple[MatchCandidate, ...], object]] = []
+        real = pipeline.run_tier4
+
+        def spy(context, established, graph_config, thresholds):  # type: ignore[no-untyped-def]
+            captured.append((context, established, thresholds))
+            return real(context, established, graph_config, thresholds)
+
+        pipeline.run_tier4 = spy  # type: ignore[assignment]
+        try:
+            run_system(self._fixture(), measure_calibration_quality=False)
+        finally:
+            pipeline.run_tier4 = real  # type: ignore[assignment]
+
+        rows: list[tuple[int, int, int]] = []
+        for context, established, thresholds in captured:
+            premises = [
+                candidate
+                for candidate in established
+                if candidate.calibrated_p is not None
+                and candidate.calibrated_p >= thresholds.tau_high
+                and candidate.arithmetic_verified
+            ]
+            linked = {
+                candidate.source_ref.record_id
+                for candidate in premises
+                if candidate.link_type is LinkType.PAYMENT_CREDITED_AS
+            }
+            credited: dict[str, int] = {}
+            for candidate in premises:
+                if candidate.link_type is LinkType.SETTLEMENT_CREDITED_AS:
+                    key = candidate.source_ref.record_id
+                    credited[key] = credited.get(key, 0) + 1
+            for view in context.settlements:
+                covered = _covered_payments(view)
+                if not covered:
+                    continue
+                have = sum(1 for p in covered if p.payment_id in linked)
+                rows.append((len(covered), have, credited.get(view.settlement_id, 0)))
+        return rows
+
+    def test_the_pipeline_never_hands_it_a_partly_assigned_settlement(self):
+        """The invariant that makes T4's zero structural rather than accidental."""
+        rows = self._premise_state()
+        assert rows, "the fixture produced no settlements to inspect"
+        partial = [row for row in rows if 0 < row[1] < row[0]]
+        assert partial == [], (
+            "a settlement was handed to T4 partly assigned, which is the state "
+            "path closure and sibling completion exist for -- T4 should now be "
+            "contributing, and decision 31 needs rewriting"
+        )
+
+    def test_a_settlement_credit_edge_never_arrives_without_its_payments(self):
+        """Path closure's premise, and why it has none.
+
+        ``S -> C`` established with payments outstanding is exactly what the
+        rule deduces from. Every tier that asserts the settlement edge asserts
+        the payment edges in the same breath, so the premise never stands alone.
+        """
+        rows = self._premise_state()
+        orphans = [row for row in rows if row[2] > 0 and row[1] < row[0]]
+        assert orphans == []
+
+    def test_it_still_runs_and_reports_on_the_corpus(self):
+        """Zero contribution is not zero work. Exclusivity does real work here.
+
+        A tier that never executed and a tier that executed and found nothing
+        are different findings, and the run record has to be able to tell them
+        apart -- the dashboard draws them differently for the same reason.
+        """
+        from ledgerloop.eval.harness import run_system
+
+        run = run_system(self._fixture(), measure_calibration_quality=False)
+        graph = run.matched.graph
+        assert graph.nodes > 0
+        assert graph.edges > 0
+        assert graph.candidates == ()
+        assert graph.path_closures == 0
+        assert graph.sibling_completions == 0
+        assert graph.credits_fully_absorbed > 0
+
+    def test_the_same_code_fires_the_moment_the_state_is_partial(self):
+        """The other half of the claim: unexercised, not broken.
+
+        The corpus never produces a partial assignment, so this constructs one
+        from the same tier's own output and shows the rule completing it. If
+        this ever failed while the invariant above still held, T4 would be dead
+        code rather than an unexercised rung.
+        """
+        only = batch(amounts=(60_000, 40_000))
+        built = corpus(batches=[only], bank_txns=[only.credit()])
+        context = MatchContext.from_ingest(built)
+        _, bank = run_tier0(context)
+        whole = run_tier4(context, bank.candidates, GRAPH, THRESHOLDS)
+        assert whole.candidates == ()
+
+        settlement_only = tuple(
+            c for c in bank.candidates if c.link_type is LinkType.SETTLEMENT_CREDITED_AS
+        )
+        partial = run_tier4(context, settlement_only, GRAPH, THRESHOLDS)
+        assert partial.path_closures == 1
+        assert partial.payment_links == 2
+
+    def test_what_it_infers_agrees_with_the_tier_that_would_have_done_it(self):
+        """No false positive, checked against T0 rather than against truth.
+
+        T0 resolves this batch on the reference alone. Stripping its payment
+        edges and letting T4 deduce them back must reproduce the same links and
+        the same rupee shares -- so the deduction is checked against another
+        tier's answer, and no ground truth is read.
+        """
+        only = batch(amounts=(60_000, 40_000))
+        built = corpus(batches=[only], bank_txns=[only.credit()])
+        context_a = MatchContext.from_ingest(built)
+        _, bank = run_tier0(context_a)
+        by_t0 = {
+            (c.source_ref.key, c.target_ref.key): allocated_share_minor(c)
+            for c in bank.candidates
+            if c.is_evaluable
+        }
+
+        context_b = MatchContext.from_ingest(built)
+        _, bank_b = run_tier0(context_b)
+        settlement_only = tuple(
+            c for c in bank_b.candidates if c.link_type is LinkType.SETTLEMENT_CREDITED_AS
+        )
+        inferred = run_tier4(context_b, settlement_only, GRAPH, THRESHOLDS)
+        by_t4 = {
+            (c.source_ref.key, c.target_ref.key): allocated_share_minor(c)
+            for c in inferred.candidates
+            if c.is_evaluable
+        }
+        assert by_t4 == by_t0
+
+    def test_it_carries_its_own_provenance(self):
+        """An inferred link has to say it was inferred, and from what."""
+        only = batch(amounts=(60_000, 40_000))
+        built = corpus(batches=[only], bank_txns=[only.credit()])
+        context = MatchContext.from_ingest(built)
+        _, bank = run_tier0(context)
+        settlement_only = tuple(
+            c for c in bank.candidates if c.link_type is LinkType.SETTLEMENT_CREDITED_AS
+        )
+        outcome = run_tier4(context, settlement_only, GRAPH, THRESHOLDS)
+        assert outcome.candidates
+        for candidate in outcome.candidates:
+            assert candidate.tier is Tier.T4_GRAPH
+            details = " ".join(item.detail for item in candidate.evidence)
+            assert "path closure" in details
+            assert any(
+                item.kind is EvidenceKind.ARITHMETIC_CHECK for item in candidate.evidence
+            )

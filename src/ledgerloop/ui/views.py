@@ -46,20 +46,28 @@ from typing import Any
 from ledgerloop.agent.store import StoredRun
 from ledgerloop.models.audit import AuditEvent
 from ledgerloop.models.decisions import MatchDecision
-from ledgerloop.models.enums import DecisionOutcome
+from ledgerloop.models.enums import DecisionOutcome, Tier
+from ledgerloop.models.metrics import METRIC_TARGETS, Proportion, Verdict
 from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.money import format_minor
 
 __all__ = [
+    "KPI_ORDER",
+    "LADDER",
     "OUTCOME_HELP",
     "DecisionTrace",
     "Headline",
+    "Kpi",
+    "TierStage",
     "exception_rows",
     "headline",
+    "kpis",
     "money_rows",
+    "outcome_rows",
     "recall_rows",
     "record_keys",
     "tier_rows",
+    "tier_stages",
     "trace_record",
 ]
 
@@ -261,6 +269,290 @@ def recall_rows(run: StoredRun) -> list[dict[str, Any]]:
         {"Anomaly class": name, "Recall": float(value)}
         for name, value in sorted(rows.items())
     ]
+
+
+# --------------------------------------------------------------------------
+# The executive layer: four proportions, each with its interval and a ruling
+# --------------------------------------------------------------------------
+#: The headline KPIs, in the order the dashboard leads with.
+#:
+#: Precision first, deliberately. It is the claim this system is built around
+#: and the one a wrong answer destroys; recall and match rate are what it costs
+#: to keep. A dashboard that led with coverage would be advertising the
+#: trade-off backwards.
+KPI_ORDER: tuple[tuple[str, str, str], ...] = (
+    (
+        "precision_interval",
+        "Precision",
+        "Of the links it committed without a human, how many were right. A wrong "
+        "auto-match is the expensive failure, so this is the number the whole "
+        "design protects.",
+    ),
+    (
+        "recall_interval",
+        "Recall",
+        "Of the links that truly exist, how many it found. Reported against no "
+        "target: this system is tuned to refuse rather than guess.",
+    ),
+    (
+        "match_rate_interval",
+        "Match rate",
+        "Of the records that could be reconciled at all, how many it resolved. "
+        "The coverage a finance team actually feels.",
+    ),
+    (
+        "exception_recall_interval",
+        "Exception recall",
+        "Of the problems the data really contains, how many reached the queue "
+        "with a typed reason attached.",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class Kpi:
+    """One headline proportion, ready to render and impossible to render bare.
+
+    Carries the estimate, the sample it came from, the 95% Wilson interval and
+    the ruling against its target. The ruling is
+    :meth:`~ledgerloop.models.metrics.Proportion.verdict` -- the same rule
+    ``EVALUATION.md`` prints -- so the dashboard cannot reach a verdict the
+    report would not.
+    """
+
+    key: str
+    label: str
+    explanation: str
+    value: float
+    ci_low: float
+    ci_high: float
+    successes: int
+    trials: int
+    target: float | None
+    verdict: Verdict
+    measured: bool
+    """False when the run stored no interval for this metric.
+
+    An older run record predates the stored intervals, and a corpus can have an
+    empty denominator. Both render as *not measured* rather than as 0.00%,
+    which is the rule the report applies too: a zero is never printed for
+    something that did not happen.
+    """
+
+    @property
+    def percent(self) -> str:
+        return f"{self.value:.2%}" if self.measured else "n/a"
+
+    @property
+    def interval(self) -> str:
+        return f"[{self.ci_low:.2%}, {self.ci_high:.2%}]" if self.measured else "no sample"
+
+    @property
+    def sample(self) -> str:
+        return f"{self.successes:,} of {self.trials:,}" if self.measured else ""
+
+    @property
+    def goal(self) -> str:
+        return "no target" if self.target is None else f"target ≥ {self.target:.0%}"
+
+
+def kpis(run: StoredRun) -> list[Kpi]:
+    """The four headline proportions, read off the stored run.
+
+    Nothing is computed here. The intervals were written by the run that
+    produced them; this reads them back and asks each one for its own verdict.
+    """
+    raw_store = run.metrics.get("intervals", {})
+    stored = raw_store if isinstance(raw_store, dict) else {}
+    out: list[Kpi] = []
+    for key, label, explanation in KPI_ORDER:
+        raw = stored.get(key)
+        target = METRIC_TARGETS.get(key)
+        if not isinstance(raw, dict):
+            out.append(
+                Kpi(
+                    key=key,
+                    label=label,
+                    explanation=explanation,
+                    value=0.0,
+                    ci_low=0.0,
+                    ci_high=1.0,
+                    successes=0,
+                    trials=0,
+                    target=target,
+                    verdict=Verdict.UNTARGETED,
+                    measured=False,
+                )
+            )
+            continue
+        proportion = Proportion.model_validate(raw)
+        out.append(
+            Kpi(
+                key=key,
+                label=label,
+                explanation=explanation,
+                value=proportion.value,
+                ci_low=proportion.ci_low,
+                ci_high=proportion.ci_high,
+                successes=proportion.successes,
+                trials=proportion.trials,
+                target=target,
+                verdict=proportion.verdict(target),
+                measured=proportion.trials > 0,
+            )
+        )
+    return out
+
+
+def outcome_rows(view: Headline) -> list[dict[str, Any]]:
+    """The four decision outcomes as rows, each with what it means.
+
+    Four, not three, and never one. The policy has four outcomes, and a
+    dashboard that collapses them has chosen which failures to mention.
+    """
+    return [
+        {
+            "Outcome": "Auto-matched",
+            "Count": view.auto_matched,
+            "key": DecisionOutcome.AUTO_MATCHED.value,
+            "tone": "good",
+        },
+        {
+            "Outcome": "Needs review",
+            "Count": view.needs_review,
+            "key": DecisionOutcome.NEEDS_REVIEW.value,
+            "tone": "warn",
+        },
+        {
+            "Outcome": "Exception",
+            "Count": view.exceptions,
+            "key": DecisionOutcome.EXCEPTION.value,
+            "tone": "bad",
+        },
+        {
+            "Outcome": "Rejected",
+            "Count": view.rejected,
+            "key": DecisionOutcome.REJECTED.value,
+            "tone": "muted",
+        },
+    ]
+
+
+# --------------------------------------------------------------------------
+# The tier ladder, as a flow rather than a table
+# --------------------------------------------------------------------------
+#: Every rung, in ladder order, with what it is for.
+#:
+#: Declared in full rather than read off the run, because a rung that
+#: contributed nothing must still appear. A ladder rendered only from the rows a
+#: run happened to produce would silently drop T4 -- and T4's zero is a
+#: measurement this project reports on purpose (ARCHITECTURE.md decision 31).
+LADDER: tuple[tuple[str, str, str], ...] = (
+    (
+        Tier.T0_EXACT.name,
+        "Exact",
+        "The reference matches and the money agrees to the paise.",
+    ),
+    (
+        Tier.T1_TOLERANCE.name,
+        "Tolerance",
+        "The reference matches and the money agrees inside a fee band.",
+    ),
+    (
+        Tier.T2_AGGREGATION.name,
+        "Aggregation",
+        "Many payments to one payout, solved as a subset sum.",
+    ),
+    (
+        Tier.T3_FUZZY.name,
+        "Lexical",
+        "The reference is gone; the merchant name and the amount are what is left.",
+    ),
+    (
+        Tier.T4_GRAPH.name,
+        "Graph",
+        "Constraint propagation over what the earlier rungs established.",
+    ),
+    (
+        Tier.T5_LLM.name,
+        "LLM",
+        "Optional, and never authoritative. It proposes; deterministic code decides.",
+    ),
+)
+
+
+@dataclass(frozen=True)
+class TierStage:
+    """One rung of the ladder as the pipeline view renders it."""
+
+    tier: str
+    label: str
+    purpose: str
+    proposed: int
+    auto_matched: int
+    marginal: int
+    wall_clock_ms: int
+    ran: bool
+    """Whether this rung executed at all.
+
+    The distinction the pipeline view turns on. A rung that ran and found
+    nothing has *measured* zero; a rung that never ran has no result, and
+    printing 0 for it would be inventing one.
+    """
+
+    @property
+    def refused(self) -> int:
+        """Proposed but not committed -- what the rung declined to assert."""
+        return max(self.proposed - self.auto_matched, 0)
+
+    @property
+    def contributed(self) -> bool:
+        return self.ran and self.auto_matched > 0
+
+
+def tier_stages(run: StoredRun) -> list[TierStage]:
+    """The full ladder, including the rungs that contributed nothing.
+
+    A rung absent from the run's own tier rows is reported as *did not run*
+    rather than as zero. The report draws exactly that line, and the two reasons
+    differ: T5 is switched off without a key, while T4 runs on every corpus and
+    genuinely finds nothing.
+    """
+    measured = {
+        str(row.get("tier", "")): row
+        for row in run.summary.get("tiers", [])
+        if isinstance(row, dict)
+    }
+    stages: list[TierStage] = []
+    for name, label, purpose in LADDER:
+        row = measured.get(name)
+        if row is None:
+            stages.append(
+                TierStage(
+                    tier=name,
+                    label=label,
+                    purpose=purpose,
+                    proposed=0,
+                    auto_matched=0,
+                    marginal=0,
+                    wall_clock_ms=0,
+                    ran=False,
+                )
+            )
+            continue
+        stages.append(
+            TierStage(
+                tier=name,
+                label=label,
+                purpose=purpose,
+                proposed=int(row.get("candidates_proposed", 0)),
+                auto_matched=int(row.get("auto_matched", 0)),
+                marginal=int(row.get("marginal_auto_matched", 0)),
+                wall_clock_ms=int(row.get("wall_clock_ms", 0)),
+                ran=True,
+            )
+        )
+    return stages
 
 
 def exception_rows(

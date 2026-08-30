@@ -647,13 +647,13 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 59 ms |
-| Throughput | 12,576 records/sec |
-| T0_EXACT | 17 ms |
+| Wall clock | 81 ms |
+| Throughput | 9,160 records/sec |
+| T0_EXACT | 21 ms |
 | T1_TOLERANCE | 3 ms |
-| T2_AGGREGATION | 4 ms |
-| T3_FUZZY | 4 ms |
-| T4_GRAPH | 19 ms |
+| T2_AGGREGATION | 8 ms |
+| T3_FUZZY | 3 ms |
+| T4_GRAPH | 28 ms |
 
 ## B0 -- Exact join on UTR (narration regex -> settlement.utr -> its payments)
 
@@ -761,8 +761,8 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 4 ms |
-| Throughput | 185,500 records/sec |
+| Wall clock | 5 ms |
+| Throughput | 148,400 records/sec |
 
 ## B1 -- Exact join + fuzzy reference recovery + nearest-amount match
 
