@@ -118,9 +118,22 @@ PROVIDER_KEY_ENVS: dict[str, str] = {
 #: The model each rung is asked for when the run's configured model is not the
 #: rung's own. A ladder that sent Groq's model id to OpenRouter would fail on
 #: every rung below the first for a reason that had nothing to do with quota.
+#:
+#: **Every entry is an explicit version, never a moving alias.** Gemini offers
+#: ``gemini-flash-latest`` and it is deliberately not used: this project's
+#: published numbers have to be reproducible, and an alias silently repoints at
+#: a different model between two runs of ``make eval``. Pinning means a retired
+#: id eventually 404s, which is loud and datable -- an alias would instead move
+#: the numbers quietly, which is the failure this project is least able to
+#: detect.
+#:
+#: That trade came due on 2026-08-30: the first live run of the Gemini rung
+#: returned ``HTTP 404 -- This model models/gemini-2.0-flash is no longer
+#: available``, and the endpoint's own message named the successor. The pin did
+#: exactly what it is for.
 PROVIDER_MODELS: dict[str, str] = {
     "groq": "llama-3.3-70b-versatile",
-    "gemini": "gemini-2.0-flash",
+    "gemini": "gemini-3.6-flash",
     "openrouter": "meta-llama/llama-3.3-70b-instruct",
     "ollama": "llama3.1",
 }

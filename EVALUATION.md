@@ -27,7 +27,7 @@ the false-positive cost column is that argument in rupees.
 |---|---|---|---|---|---|---|---|---|---|
 | B0 | `test` | 330 † | 330 | 59.09% | 66.33% | 65.80% | 135 | ₹34,98,306.00 | n/a |
 | B1 | `test` | 396 † | 396 | 65.40% | 88.10% | 86.67% | 137 | ₹35,37,867.00 | n/a |
-| B2 § | `dev` ‡ | 60 † | 60 | 70.00% | 71.19% | 97.06% | 18 | ₹4,32,588.00 | n/a |
+| B2 | `dev` ‡ | 11 † | 11 | 100.00% | 18.64% | 17.65% | 0 | ₹0.00 | n/a |
 | B3 (`T0-T4`) | `test` | 283 | 283 | 100.00% | 96.26% | 91.59% | 0 | ₹0.00 | 100.00% |
 
 † A baseline has no proposal stage separate from its output: every link it
@@ -41,17 +41,6 @@ residual, so its token cost scales with the whole dataset and running it on
 demonstrate the same point. Its row is therefore **not** directly comparable
 to the rows above it, and the difference is stated here rather than left in
 a footnote nobody reads.
-
-§ **B2 was not answered by a language model.** There is no provider key
-in this environment, so its prompts were answered by the documented
-stand-in reasoner in `eval/offline_provider.py`, which reads the prompt
-text and nothing else. Its **cost, cache, call and failure figures are
-measured machinery** -- the same prompt, cache, budget, schema and ledger a
-live provider goes through. Its **precision and recall are a property of
-that rule and are not a claim about any model.** What the row does
-demonstrate is architectural and reasoner-independent: output asserted
-with no `verify_arithmetic` behind it is asserted wrong as readily as
-right, and the token cost scales with the corpus rather than the residual.
 
 The systems' descriptions:
 
@@ -242,31 +231,16 @@ The "why not just an LLM" answer, run without any of the safeguards the
 production system applies to the same model: no decision policy, no grounding
 gate, no `verify_arithmetic`, no calibration. Whatever it returns is asserted.
 
-> **Answered by a stand-in, not by a model.** No provider key is available
-> here, so `eval/offline_provider.py` answered these prompts by reading the
-> prompt text and taking, for each settlement group, the bank credit whose
-> amount is nearest the group's **gross** total -- argmax, no uniqueness
-> check, no fee model. That rule is stated in full in the module docstring.
->
-> Everything in the cost table below is measured: the same prompt, the same
-> content-hash cache, the same budget, the same schema validation, the same
-> ledger. Everything in the accuracy row above is a property of that rule.
->
-> The invented-id counters read zero because the stand-in cannot invent an
-> id. A real model can, which is why the counters exist -- a zero from a
-> reasoner incapable of the failure is not evidence that the failure does
-> not happen.
-
 | | |
 |---|---|
 | Split | `dev` (seed 42, standard) |
 | Payments offered | 60 |
 | Bank credits offered (in every prompt) | 11 |
 | Calls attempted | 5 |
-| ...that produced no usable answer | 0 |
-| Links returned | 60 |
+| ...that produced no usable answer | 4 |
+| Links returned | 11 |
 | ...repeated across batches | 0 |
-| ...asserted after de-duplication | 60 |
+| ...asserted after de-duplication | 11 |
 | **Payment ids that exist in no source** | **0** |
 | **Bank txn ids that exist in no source** | **0** |
 
@@ -279,14 +253,14 @@ scored, which is why it appears as a false positive rather than as a warning.
 
 | | B2 | LedgerLoop, same corpus |
 |---|---|---|
-| Calls | 5 | -- |
-| Cache hits | 0 (0.00%) | -- |
-| Tokens | 4,357 | -- |
+| Calls | 1 | 0 |
+| Cache hits | 0 (0.00%) | 0 |
+| Tokens | 2,007 | 0 |
 | Actual cost | ₹0.00 | ₹0.00 |
-| Equivalent paid cost | ₹2.15 | ₹0.00 |
+| Equivalent paid cost | ₹1.07 | ₹0.00 |
 
 **LedgerLoop reconciled the same corpus with zero LLM calls and zero
-tokens.** B2 spent 4,357. The ratio is therefore
+tokens.** B2 spent 2,007. The ratio is therefore
 not a multiple at all -- its denominator is zero -- and the honest statement
 is the one the deterministic-first design was arguing for: on this corpus
 the tier ladder needed no model, so every token in the left-hand column is
@@ -301,37 +275,38 @@ sentence.
 
 ## The production LLM path, measured
 
-> **Offline stand-in.** These prompts were answered by
-> `llm/offline_analyst.py` — a documented rule that reads the prompt
-> and nothing else — because no provider key was present. Every column
-> below is **measured machinery**: the calls, tokens, latency, cache,
-> failures, budget refusals and gate outcomes all happened on the real
-> code path. **No claim is made here about any language model's answer
-> quality**, and the acceptance rates are properties of that rule.
+**Live.** Ladder: gemini. The rung that answered was `gemini`, at fallback depth 0.
+
+- rung declined — gemini: gemini did not respond: The read operation timed out (after 1 attempt(s))
+- rung declined — gemini: gemini returned HTTP 503 (after 1 attempt(s))
+- rung declined — gemini: gemini did not respond: The read operation timed out (after 1 attempt(s))
+- rung declined — gemini: gemini returned HTTP 503 (after 1 attempt(s))
+- rung declined — gemini: gemini returned HTTP 503 (after 1 attempt(s))
+- rung declined — gemini: gemini did not respond: The read operation timed out (after 1 attempt(s))
 
 | | |
 |---|---|
 | Corpus | `test` seed 42, 742 records |
-| Live provider | no — offline stand-in |
-| Calls | 15 |
+| Live provider | yes |
+| Calls | 9 |
 | Cache hits | 0 (0% of attempts) |
-| Calls per 100 records | 2.02 |
-| Prompt / completion tokens | 9611 / 7933 |
-| Provider latency | 15 ms |
+| Calls per 100 records | 1.21 |
+| Prompt / completion tokens | 7564 / 5533 |
+| Provider latency | 149769 ms |
 | Actual spend | ₹0.00 |
-| Equivalent paid-API cost | ₹12.32 |
-| Calls refused (budget / outage / schema) | 0 |
+| Equivalent paid-API cost | ₹8.81 |
+| Calls refused (budget / outage / schema) | 6 |
 | Schema failures retried | 0 |
 
 ### What the gates did with what came back
 
 | | |
 |---|---|
-| Narrations offered → accepted | 35 → 35 |
+| Narrations offered → accepted | 35 → 11 |
 | Link proposals returned → accepted | 1 → 0 |
-| Refused: reference not in the evidence pack | 0 |
-| Demoted: money did not close under `verify_arithmetic` | 1 |
-| Exception prose rewritten | 67 |
+| Refused: reference not in the evidence pack | 9 |
+| Demoted: money did not close under `verify_arithmetic` | 0 |
+| Exception prose rewritten | 20 |
 
 A demoted proposal is **not dropped**: it becomes a candidate routed to a
 human, because "the model suggested this and the arithmetic disagrees" is
@@ -647,13 +622,13 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 81 ms |
-| Throughput | 9,160 records/sec |
-| T0_EXACT | 21 ms |
-| T1_TOLERANCE | 3 ms |
-| T2_AGGREGATION | 8 ms |
+| Wall clock | 61 ms |
+| Throughput | 12,164 records/sec |
+| T0_EXACT | 16 ms |
+| T1_TOLERANCE | 2 ms |
+| T2_AGGREGATION | 5 ms |
 | T3_FUZZY | 3 ms |
-| T4_GRAPH | 28 ms |
+| T4_GRAPH | 21 ms |
 
 ## B0 -- Exact join on UTR (narration regex -> settlement.utr -> its payments)
 

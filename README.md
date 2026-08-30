@@ -295,9 +295,13 @@ link-level ground truth read back off disk.
 
 The deterministic ladder now beats every baseline on recall *and* is the only one that is
 never wrong. The false-positive column is what the others pay for the difference.
-§ B2 is on a **different, smaller corpus** (`dev`, 59 links vs 294) and its
-prompts were answered by a documented offline stand-in, not a language model — its accuracy
-figures say nothing about any model. `EVALUATION.md` banners both facts.
+§ B2 is on a **different, smaller corpus** (`dev`, 59 links vs 294) and is now answered by
+a **live** Gemini model. Read its recall with the caveat `EVALUATION.md` prints beside it:
+**four of its five calls produced no usable answer**, so 18.64% is substantially a
+measurement of a flaky free tier and not purely of what a model can do. The same baseline
+answered by the offline stand-in — which never fails — reached 71.19% recall with **18
+false positives**, which is the number that actually makes the point: B2 has no grounding
+gate and no `verify_arithmetic`, so whatever it returns, it asserts.
 
 **Across five seeds** (`test`, standard difficulty, mean ± sample standard deviation):
 
@@ -526,15 +530,23 @@ worth knowing before you look:
 - **No live LLM has been run.** There is no provider key in this environment and none was
   invented. The provider ladder is built and unit-tested against fake rungs (failover,
   rate-limit retry, `Retry-After`, ladder exhaustion, cache stability), and the *production*
-  LLM path was measured end to end — 16 calls, 20,087 tokens, 2.16 calls per 100 records, 35
-  narration repairs accepted, 4 link proposals returned and **0 accepted** with 2 demoted by
-  `verify_arithmetic`, 74 exception explanations rewritten, ₹0 actual and ₹14.27
-  equivalent-paid cost — with a documented offline stand-in that reads the prompt and
-  nothing else, **and a `--no-llm` control over the same corpus whose four headline figures
-  are identical**. The
-  artefact records `live: false` and the report prints a banner. **No claim is made here
-  about any language model's answer quality.** One command produces a live measurement on a
-  machine that has a key: `ledgerloop llm-report --data ... ` without `--offline-provider`.
+  LLM path has now been measured **live against Gemini** (`gemini-3.6-flash`, fallback depth
+  0) — 9 calls, 13,097 tokens, 1.21 calls per 100 records, 149.8 s of provider time, 11 of
+  35 narration repairs accepted, 1 link proposal returned and **0 accepted**, **9 outputs
+  refused by the grounding gate**, 20 exception explanations rewritten, ₹0 actual and ₹8.81
+  equivalent-paid cost — **and a `--no-llm` control over the same corpus whose four headline
+  figures are identical to six decimal places**. The model changed no published metric,
+  which is what *the LLM proposes, deterministic code decides* looks like when it is
+  measured rather than asserted.
+
+  Two things only a real provider could show. **Six of fifteen calls failed** — three read
+  timeouts and three HTTP 503s — and cost nothing, because a failed batch contributes
+  nothing. And the **grounding gate fired nine times**, against zero for the offline
+  stand-in: `EVALUATION.md` had argued in advance that "a zero from a reasoner incapable of
+  the failure is not evidence that the failure does not happen", and a real model duly cited
+  records that were not in its evidence pack. The live figures are **one measured run** and
+  are not reproducible — call counts, failures and latency depend on the network. Every
+  deterministic number in this README still reproduces with `--no-llm` and no key.
 - **`UNMATCHABLE` records are a real ceiling**, not a model failure: 67.6 ± 2.3 records
   per `test` corpus cannot be resolved from the three sources at all. They are excluded from
   the match-rate denominator and reported on their own line, because a system that

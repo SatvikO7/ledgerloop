@@ -19,6 +19,7 @@ from ledgerloop.llm.client import (
 )
 from ledgerloop.llm.providers import (
     DEFAULT_LADDER,
+    PROVIDER_MODELS,
     FailoverProvider,
     build_ladder,
     configured_rungs,
@@ -232,6 +233,27 @@ class TestWhichRungsAMachineHas:
 
     def test_no_ladder_is_built_for_a_run_that_asked_for_no_model(self):
         assert build_ladder(LLMConfig(enabled=False), environ={"GROQ_API_KEY": "k"}) is None
+
+    def test_every_rung_is_pinned_to_a_version_never_to_a_moving_alias(self):
+        """Reproducibility outranks staying current, and the two conflict here.
+
+        Gemini publishes ``gemini-flash-latest``; Groq and OpenRouter publish
+        similar aliases. Using one would keep the ladder working forever and
+        would silently repoint at a different model between two runs of
+        ``make eval`` -- which is the one failure this project cannot detect,
+        because the numbers would simply be different and nothing would say why.
+
+        A pinned id fails loudly instead. That came due on 2026-08-30: the first
+        live call to the Gemini rung returned ``HTTP 404 -- This model
+        models/gemini-2.0-flash is no longer available``. Loud, datable, and
+        fixed by one line.
+        """
+        for name, model in PROVIDER_MODELS.items():
+            assert "latest" not in model, (
+                f"the {name} rung is pinned to the moving alias {model!r}; a "
+                "published number produced by an alias cannot be reproduced"
+            )
+            assert model.strip() == model and model
 
 
 class _Echo(FrozenLedgerModel):
