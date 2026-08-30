@@ -20,7 +20,12 @@ import pytest
 from ledgerloop.cli import main
 from ledgerloop.config import LLMConfig, RunConfig
 from ledgerloop.llm.cache import ResponseCache
-from ledgerloop.llm.client import LLMClient, LLMUnavailable, ScriptedProvider
+from ledgerloop.llm.client import (
+    LLMClient,
+    LLMUnavailable,
+    RateLimited,
+    ScriptedProvider,
+)
 from ledgerloop.llm.integration import (
     LLMRunSummary,
     adjudicator_for,
@@ -361,3 +366,126 @@ def _without_timings(text: str) -> str:
             continue
         keep.append(line)
     return "\n".join(keep)
+
+
+class TestAModelThatMisbehavesCannotCostPrecision:
+    """The safety property a live run would have stressed, tested without a key.
+
+    Phase 2.8 set out to make one live call and could not: no rung of the ladder
+    is reachable on this machine (no credential, and no local Ollama), so
+    ``build_ladder`` returns ``None`` and ``llm-report`` refuses. That blocker is
+    environmental and the code path is complete -- but the *reason* a live run
+    matters is that a real provider fails, rate-limits and answers wrongly in
+    ways a scripted one has to be told to imitate.
+
+    So the failure semantics are pinned here instead. Both cases below are
+    exactly what a bad live call looks like from inside the pipeline, and
+    neither is allowed to move a published number:
+
+    * the provider never answers at all -- outage, exhausted ladder, bad key.
+
+    The second shape -- a grounded, confident reply whose money does not close --
+    is already covered end to end by
+    ``TestTheAdjudicator.test_a_proposal_whose_money_does_not_close_can_never_auto_match``
+    and is deliberately not repeated here.
+
+    The unit tests around ``verify_arithmetic`` and the grounding gates already
+    check each guard in isolation. What was missing is the end-to-end claim: run
+    the **whole system** with a hostile model and show the answer is the
+    deterministic one, to the link.
+    """
+
+    @pytest.fixture
+    def corpus_dir(self, tmp_path):
+        out = tmp_path / "test-9"
+        assert (
+            main(
+                ["generate", "--split", "test", "--seed", "9", "--orders", "120",
+                 "--out", str(out)]
+            )
+            == 0
+        )
+        return out
+
+    @staticmethod
+    def _links(run):
+        return run.metrics.link_metrics
+
+    def test_a_provider_that_never_answers_changes_nothing(self, corpus_dir, tmp_path):
+        """Every call fails. The run must land on the deterministic answer.
+
+        Not "approximately the same" -- the same true positives, the same false
+        positives, the same false negatives. A model that cannot be reached must
+        cost exactly nothing, because everything it would have contributed was
+        optional by construction.
+        """
+        from ledgerloop.eval.harness import run_system
+
+        settings = LLMConfig(cache_dir=tmp_path / "dead-cache")
+        dead = LLMClient(
+            config=settings,
+            provider=ScriptedProvider(failure=LLMUnavailable("connection refused")),
+            cache=ResponseCache(directory=settings.cache_dir),
+        )
+        with_dead_model = run_system(
+            corpus_dir, client=dead, measure_calibration_quality=False
+        )
+        without = run_system(corpus_dir, measure_calibration_quality=False)
+
+        live, base = self._links(with_dead_model), self._links(without)
+        assert (live.true_positives, live.false_positives, live.false_negatives) == (
+            base.true_positives, base.false_positives, base.false_negatives
+        )
+        assert live.precision == base.precision
+        assert with_dead_model.metrics.match_rate == without.metrics.match_rate
+
+    def test_the_failure_is_recorded_rather_than_swallowed(self, corpus_dir, tmp_path):
+        """Degrading quietly is right; degrading *silently* is not.
+
+        The run must still be able to say a model was asked and did not answer,
+        or the cost ledger would report a clean run over a broken one.
+        """
+        from ledgerloop.eval.harness import run_system
+
+        settings = LLMConfig(cache_dir=tmp_path / "dead-cache-2")
+        dead = LLMClient(
+            config=settings,
+            provider=ScriptedProvider(failure=LLMUnavailable("connection refused")),
+            cache=ResponseCache(directory=settings.cache_dir),
+        )
+        run_system(corpus_dir, client=dead, measure_calibration_quality=False)
+        assert dead.provider_failures > 0
+        assert dead.calls == 0
+
+    def test_a_failing_provider_introduces_no_false_positive(
+        self, corpus_dir, tmp_path
+    ):
+        """Precision before recall, on the path where the model is broken."""
+        from ledgerloop.eval.harness import run_system
+
+        settings = LLMConfig(cache_dir=tmp_path / "dead-cache-3")
+        dead = LLMClient(
+            config=settings,
+            provider=ScriptedProvider(failure=LLMUnavailable("503 upstream")),
+            cache=ResponseCache(directory=settings.cache_dir),
+        )
+        run = run_system(corpus_dir, client=dead, measure_calibration_quality=False)
+        assert self._links(run).false_positives == 0
+        assert self._links(run).false_positive_cost_minor == 0
+
+    def test_a_rate_limit_is_a_failure_like_any_other_to_the_answer(
+        self, corpus_dir, tmp_path
+    ):
+        """429 is the failure a live demo actually hits, and it must be boring."""
+        from ledgerloop.eval.harness import run_system
+
+        settings = LLMConfig(cache_dir=tmp_path / "limited-cache")
+        limited = LLMClient(
+            config=settings,
+            provider=ScriptedProvider(failure=RateLimited("429 too many requests")),
+            cache=ResponseCache(directory=settings.cache_dir),
+        )
+        run = run_system(corpus_dir, client=limited, measure_calibration_quality=False)
+        base = run_system(corpus_dir, measure_calibration_quality=False)
+        assert self._links(run).false_positives == 0
+        assert self._links(run).true_positives == self._links(base).true_positives
