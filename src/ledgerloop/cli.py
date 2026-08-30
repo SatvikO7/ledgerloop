@@ -78,6 +78,7 @@ from ledgerloop.eval.llm_report import run_llm_report
 from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.offline_provider import OFFLINE_PROVIDER_NAME, OfflineReasoner
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
+from ledgerloop.eval.scale import DEFAULT_SCALE_SIZES, run_scale
 from ledgerloop.eval.sweep import SweepArtifact, run_sweep
 from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.fitting import FittingError, fit_from_corpora, harvest_corpora
@@ -507,6 +508,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="artefact destination (default reports/llm_baseline.json)",
     )
 
+    scale = subparsers.add_parser(
+        "scale",
+        help="benchmark the pipeline over a series of corpus sizes, up to the "
+        "scale split's 5,000 orders",
+    )
+    scale.add_argument(
+        "--sizes",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_SCALE_SIZES),
+        help="order counts to run, smallest first (default: "
+        + " ".join(str(n) for n in DEFAULT_SCALE_SIZES)
+        + "). The small end is the size of `test`, so the curve is anchored to "
+        "the corpus every published number comes from.",
+    )
+    scale.add_argument("--seed", type=int, default=42, help="RNG seed for every size")
+    scale.add_argument(
+        "--difficulty",
+        type=Difficulty,
+        choices=list(Difficulty),
+        default=Difficulty.STANDARD,
+        help="anomaly prevalence dial",
+    )
+    scale.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data/generated"),
+        help="where the scale corpora are written and looked for",
+    )
+    scale.add_argument(
+        "--calibration",
+        type=Path,
+        default=None,
+        help="a bundle written by `ledgerloop calibrate`",
+    )
+    scale.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="rebuild the corpora even where they already exist",
+    )
+    scale.add_argument(
+        "--out",
+        type=Path,
+        default=Path("reports/scale.json"),
+        help="where the artefact is written (default reports/scale.json)",
+    )
+
     comparison = subparsers.add_parser(
         "comparison",
         help="run the headline configuration with and without one change, and "
@@ -911,6 +959,20 @@ def _negative_counters(run: SystemRun) -> tuple[tuple[str, str, int], ...]:
             matched.lexical.rejected_on_margin,
         ),
         (
+            "T3 rejected on contention",
+            "two settlements of the same merchant both had a claim on the credit; "
+            "their nets agree inside the band and the name is the same string, so "
+            "no lexical reading says which one it paid",
+            matched.lexical.rejected_on_contention,
+        ),
+        (
+            "T3 settlements already referenced",
+            "the bank had written the settlement's own UTR on a credit, so the "
+            "statement has already said where the payout went; a whole-net match "
+            "on a name would contradict it",
+            matched.lexical.settlements_already_referenced,
+        ),
+        (
             "T4 inferences made",
             "path closure and sibling completion; zero here because every "
             "earlier tier matches at settlement granularity, so the partial "
@@ -1257,6 +1319,59 @@ def _run_comparison(args: argparse.Namespace) -> int:
     )
     print(f"  wrote {args.out}")
     return 0
+
+
+def _run_scale(args: argparse.Namespace) -> int:
+    """Walk the size curve and report quality and cost side by side.
+
+    The precision column is printed first and the throughput last, which is the
+    order of their importance and the reverse of the order the item was written
+    in. A false positive at 5,000 orders is a defect; a slow run is a machine.
+    """
+    bundle: CalibrationBundle | None = None
+    if args.calibration is not None:
+        try:
+            bundle = CalibrationBundle.load(args.calibration)
+        except FileNotFoundError:
+            print(f"no calibration bundle at {args.calibration}", file=sys.stderr)
+            return 1
+
+    try:
+        artifact = run_scale(
+            args.data_dir,
+            sizes=args.sizes,
+            bundle=bundle,
+            seed=args.seed,
+            difficulty=args.difficulty,
+            regenerate=args.regenerate,
+        )
+    except ValueError as exc:
+        print(f"scale run refused: {exc}", file=sys.stderr)
+        return 1
+    artifact.save(args.out)
+
+    print(f"scale curve · seed {artifact.seed} · {artifact.difficulty}")
+    print(f"  machine: {artifact.machine}")
+    print("  orders   records  precision   recall  match rate    FP   wall  rec/s")
+    for point in artifact.points:
+        print(
+            f"  {point.orders:6d}  {point.records:8d}     "
+            f"{point.precision:.4f}   {point.recall:.4f}      "
+            f"{point.match_rate:.4f}  {point.false_positives:4d}  "
+            f"{point.wall_clock_ms / 1000:5.1f}s  {point.records_per_second:,.0f}"
+        )
+
+    dirty = [p for p in artifact.points if p.false_positives]
+    if dirty:
+        print(
+            "  FALSE POSITIVES at "
+            + ", ".join(f"{p.orders} orders ({p.false_positives})" for p in dirty),
+            file=sys.stderr,
+        )
+    else:
+        print("  precision held at every size ✓")
+    print(f"  wrote {args.out}")
+    return 0 if not dirty else 1
 
 
 def _run_llm_report(args: argparse.Namespace) -> int:
@@ -1941,6 +2056,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_pipeline(args)
     if args.command == "comparison":
         return _run_comparison(args)
+    if args.command == "scale":
+        return _run_scale(args)
     if args.command == "llm-report":
         return _run_llm_report(args)
     if args.command == "demo":

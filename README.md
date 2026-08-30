@@ -1,5 +1,7 @@
 # LedgerLoop
 
+[![CI](https://github.com/SatvikO7/ledgerloop/actions/workflows/ci.yml/badge.svg)](https://github.com/SatvikO7/ledgerloop/actions/workflows/ci.yml)
+
 **A three-way reconciliation agent with an honest exception list.**
 
 Reconciles the internal ledger, PSP settlements, and bank statements across heterogeneous
@@ -210,7 +212,7 @@ same command twice produces byte-identical files and anyone can reproduce every 
 | `train` | 400 | fits the score blender |
 | `calibration` | 200 | fits isotonic calibration and selects thresholds — never evaluated on |
 | `test` | 300 | every published number comes from here |
-| `scale` | 5,000 | supported by the generator (~1.5 s to generate); **not benchmarked** |
+| `scale` | 5,000 | throughput and precision benchmarked — see [Scale](#scale) |
 
 Eleven anomaly classes are injected at controlled prevalence, with a `--difficulty
 {easy,standard,hard}` dial that changes *how much* goes wrong without changing *what* goes
@@ -433,6 +435,57 @@ Thresholds are fitted on a `calibration` split and never on `test`; the evaluati
 seeded, and two runs of `make eval` produce byte-identical output apart from one labelled
 block of measured timings.
 
+### Scale
+
+`ledgerloop scale` walks a series of corpus sizes and reports quality and cost side by
+side. It writes `reports/scale.json`; the figures below are seed 42, standard difficulty,
+on Windows AMD64 / Python 3.11.9.
+
+| Orders | Records | Precision | Recall | Match rate | False positives | Wall clock | Records/sec |
+|---|---|---|---|---|---|---|---|
+| 300 | 727 | **1.0000** | 0.9628 | 0.9377 | 0 | 0.1 s | 6,527 |
+| 1,000 | 2,448 | **1.0000** | 0.8745 | 0.8478 | 0 | 0.5 s | 4,957 |
+| 2,500 | 6,121 | **1.0000** | 0.8857 | 0.8603 | 0 | 2.0 s | 3,123 |
+| 5,000 | 12,233 | **1.0000** | 0.8532 | 0.8273 | 0 | 7.4 s | 1,646 |
+
+```
+python -m ledgerloop.cli scale --calibration reports/calibration.json
+```
+
+**Precision holds at every size, and it did not the first time.** Throughput was the
+stated goal of this run and turned out to be the less interesting half. Every published
+precision figure in this project comes from 60 to 400 orders, and the first 5,000-order
+run produced **22 false positives** at `p = 1.0` — the one failure mode the architecture
+exists to prevent. Two of T3's uniqueness arguments were quietly size-dependent: a
+merchant's payouts sit lakhs apart on a base of crores, so two settlements of the *same*
+merchant land inside each other's tolerance band once that merchant has enough of them,
+and their narrations are the same string because it is the same merchant.
+
+Two guards closed it, both of which can only make the tier decline more:
+
+- **A settlement whose own UTR the bank has written on some credit is not T3's work.**
+  The statement has already said where that payout went. This is the case A09 composed
+  with A07 on one tranche only: one tranche keeps the reference, the other loses it, T2
+  correctly will not close it because the keyed half does not sum to the net, and T3 was
+  then free to match the *whole* net against an unrelated credit that happened to land
+  0.2% away. All 22 came from exactly that.
+- **A credit two settlements both have a claim on is contested, and every claimant
+  refuses it.** T3's margin already asked whether one settlement had two indistinguishable
+  credits; it never asked the mirror-image question. Nine credits at 5,000 orders are
+  claimed by two or three settlements apiece, all scoring 1.0 — same merchant, same
+  string — and a settlement-ordered loop handed each to whichever it reached first.
+
+Neither guard changes a single published number: across all 29 committed corpora they fire
+zero times for contention and cost zero links, and `test`-standard-42 still reads
+283/0/11. The whole cost is at 5,000 orders, where 22 false positives are traded for 8 true
+positives — precision 0.9948 → **1.0000**, recall 0.8548 → 0.8532.
+
+**Throughput is super-linear.** 16.8× the records takes ~74× the wall clock, so the curve
+bends: roughly `O(n^1.5)`. That is expected of a design whose passes repeatedly ask "is
+there another row like this one", and 5,000 orders in 7.4 seconds is comfortably inside
+any batch reconciliation window. It is recorded rather than optimised, because nothing in
+the evaluation is currently bounded by it.
+
 ## Limitations, stated rather than buried
 
 The uncomfortable numbers are printed in `EVALUATION.md` beside the good ones. The ones
@@ -483,13 +536,13 @@ worth knowing before you look:
   denominator in the report — thirty records on seed 42 — and 30 of 30 does **not**
   demonstrate ≥ 0.95 from thirty records: the 95% Wilson interval is [0.8865, 1.0000] and
   the target sits inside it. The report calls that *undecided* rather than a pass.
-- **The `scale` split has never been benchmarked.** The generator supports 5,000 orders;
-  no throughput run has been made against it.
-- **CI is configured but has never run.** `.github/workflows/ci.yml` runs the same three
-  commands as `make check` on push and pull request. It was validated statically and each
-  command was run locally, but this environment cannot execute a GitHub-hosted job — so
-  **there is no badge in this README yet**, because a badge for a workflow nobody has
-  watched go green would assert a build that has not happened.
+- **The scale curve is four points on one machine, at one seed.** It is enough to show
+  that precision holds and that the growth is super-linear; it is not a performance
+  characterisation, and the throughput figures describe the machine that produced them.
+- **CI has run green once, on the commit that introduced it.** `.github/workflows/ci.yml`
+  runs the same three commands as `make check` on push and pull request. The badge above
+  reports the latest run; note the repository is private, so the badge renders only for
+  someone who can see the repository.
 - **Synthetic data only.** Eleven anomaly classes at controlled prevalence from a seeded
   generator. Nothing here has met a real bank statement.
 

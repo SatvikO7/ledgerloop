@@ -40,6 +40,56 @@ hold:
 3. **Name**, at or above ``min_score``, and beating the runner-up by
    ``min_margin``.
 
+UNIQUENESS HAS TWO DIRECTIONS
+-----------------------------
+Gate 3's margin asks *one* question: does this settlement have two credits the
+scorer cannot separate? That leaves the mirror-image question unasked -- do two
+**settlements** both have a claim on this credit? They are different failures
+and only the first was being caught.
+
+The second one cannot arise on a small corpus and is close to certain on a large
+one. A merchant's payouts are a few lakh apart on a base of several crore, so two
+settlements of the *same* merchant land inside T1's tolerance band of each other
+as soon as that merchant has enough of them; the date window then admits both,
+and the name is by construction identical because it is the same merchant. On the
+committed corpora (60-400 orders) this happens **zero** times. At 2,500 orders it
+happens once and at 5,000 it happens nine times -- and a settlement-ordered greedy
+loop hands the credit to whichever settlement it reached first, at ``p = 1.0``
+with the arithmetic verifying, because the amounts really do agree.
+
+So the credit side carries the same test as the settlement side, against the same
+``min_margin`` and with no new constant: a credit claimed by a second settlement
+that the score cannot put behind the first is **contested**, and every claimant
+refuses it. Two settlements of one merchant always score identically, so a
+same-merchant contest can never be resolved on the name -- which is precisely
+why refusing is the only honest answer available to a *lexical* tier.
+
+ALREADY-REFERENCED SETTLEMENTS ARE NOT T3'S WORK
+-------------------------------------------------
+The rule below says a *credit* carrying a reference is already explained. The
+same evidence runs the other way and was not being applied: a **settlement**
+whose UTR the bank has written on some credit has already been told where its
+money went, and a whole-net match to a different, unreferenced credit contradicts
+the statement rather than reading it.
+
+The case that makes this concrete is A09 composed with A07 on one side only. A
+settlement pays out in two tranches; one tranche keeps the settlement's UTR and
+the other loses it. T2 will not close it, because the keyed tranches do not sum
+to the whole net -- correctly, half the money is missing. The settlement is
+therefore still open when T3 reaches it, and T3's amount gate compares a *whole*
+net against single credits. On a large statement some other settlement's tranche
+lands inside that band: at 5,000 orders two do, 0.27% and 0.22% away from a net
+several crore wide, inside the date window, spelt with the same merchant name
+because it *is* the same merchant. Every gate passes and the tier auto-matches at
+``p = 1.0`` with the arithmetic verifying, because the amounts genuinely agree.
+
+Twenty-two wrong links on one corpus came from exactly that, and none of them is
+reachable by tightening a threshold: the evidence T3 reads really does point that
+way. What rules them out is evidence T3 was not consulting -- the settlement's own
+UTR, sitting on a credit elsewhere in the statement. Finding the missing tranche
+of a partly-referenced payout is T2's arithmetic, where the sum has to close; it
+is not something a name and an amount band should be allowed to guess at.
+
 WHY THE CANDIDATE MUST BE UNREFERENCED
 ---------------------------------------
 T3 only considers credits whose ``extracted_utr`` is ``None``. A credit that
@@ -117,6 +167,14 @@ class NameMatch:
 
 
 @dataclass(frozen=True)
+class _Claim:
+    """One settlement's above-gate claim on one credit."""
+
+    settlement_id: str
+    score: float
+
+
+@dataclass(frozen=True)
 class LexicalOutcome:
     """What one T3 pass produced."""
 
@@ -133,6 +191,8 @@ class LexicalOutcome:
     names_scored: int = 0
     rejected_below_score: int = 0
     rejected_on_margin: int = 0
+    rejected_on_contention: int = 0
+    settlements_already_referenced: int = 0
 
     @property
     def tier(self) -> Tier:
@@ -382,6 +442,47 @@ def _ambiguity_evidence(
     )
 
 
+def _closest_rival(
+    claimants: tuple[_Claim, ...], settlement_id: str
+) -> _Claim | None:
+    """The strongest *other* settlement claiming the same credit.
+
+    Ties break on ``settlement_id`` so the rival named in the evidence is the
+    same one on every run over the same data.
+    """
+    others = [claim for claim in claimants if claim.settlement_id != settlement_id]
+    if not others:
+        return None
+    return max(others, key=lambda claim: (claim.score, claim.settlement_id))
+
+
+def _contention_evidence(
+    view: SettlementView,
+    best: NameMatch,
+    rival: _Claim,
+    claimants: tuple[_Claim, ...],
+    lexical: LexicalMatching,
+) -> Evidence:
+    """Why a credit that passed all three gates is still not assignable."""
+    return Evidence(
+        kind=EvidenceKind.NEGATIVE_EVIDENCE,
+        detail=(
+            f"{best.credit.txn_id} is claimed by {len(claimants)} settlements of the "
+            f"same merchant -- {view.settlement_id} at {best.score:.3f} and "
+            f"{rival.settlement_id} at {rival.score:.3f}, {best.score - rival.score:.3f} "
+            f"apart against a required margin of {lexical.min_margin:.3f}. Their nets "
+            "agree inside the amount band and the name is the same string for both, so "
+            "nothing in a lexical reading says which settlement this credit paid"
+        ),
+        refs=(
+            settlement_ref(view.settlement_id),
+            settlement_ref(rival.settlement_id),
+            bank_ref(best.credit.txn_id),
+        ),
+        amount_minor=best.credit.credit_minor,
+    )
+
+
 def _settlement_candidate(
     view: SettlementView,
     match: NameMatch,
@@ -500,7 +601,15 @@ def run_tier3(
     candidates: list[MatchCandidate] = []
     seen = resolved = ambiguous = unsolved = without_profile = 0
     credits_matched = payments_matched = scored_count = below = margin_rejects = 0
+    contention_rejects = already_referenced = 0
 
+    # Pass 1 -- score, commit to nothing. The claim map has to be complete before
+    # any credit is handed out, because contention is a property of the whole
+    # statement and a loop that consumed as it went would only ever see the
+    # claims it had not yet satisfied. Nothing is consumed here, so the map does
+    # not depend on the order the settlements are visited in.
+    ranked: list[tuple[SettlementView, MerchantProfile, list[NameMatch]]] = []
+    claims: dict[str, list[_Claim]] = {}
     for view in list(context.open_settlements()):
         merchant = context.merchant_of(view)
         profile = master.get(merchant) if merchant is not None else None
@@ -508,6 +617,11 @@ def run_tier3(
             without_profile += 1
             continue
         if not view.payments or view.net_minor <= 0:
+            continue
+        if view.utr is not None and context.credits_by_utr.get(view.utr):
+            # The bank has written this settlement's UTR on a credit, so it has
+            # already said where this payout went. See ALREADY-REFERENCED, above.
+            already_referenced += 1
             continue
 
         pool = candidate_credits(view, context, tolerances, lexical)
@@ -523,6 +637,14 @@ def run_tier3(
             unsolved += 1
             continue
 
+        ranked.append((view, profile, scored))
+        for match in scored:
+            claims.setdefault(match.credit.txn_id, []).append(
+                _Claim(settlement_id=view.settlement_id, score=match.score)
+            )
+
+    # Pass 2 -- assign, against a claim map that no longer moves.
+    for view, profile, scored in ranked:
         best = scored[0]
         runner_up = scored[1] if len(scored) > 1 else None
         if runner_up is not None and best.score - runner_up.score < lexical.min_margin:
@@ -540,6 +662,30 @@ def run_tier3(
                     lexical=lexical,
                     runner_up=None,
                     extra=(_ambiguity_evidence(view, best, runner_up, lexical),),
+                )
+            )
+            context.consume(view.settlement_id)
+            ambiguous += 1
+            continue
+
+        # The mirror-image test: does a second settlement have as good a claim on
+        # this credit? Same margin, same refusal, same uniform prior -- the only
+        # difference is which side of the pairing the rival sits on.
+        claimants = tuple(claims.get(best.credit.txn_id, ()))
+        rival = _closest_rival(claimants, view.settlement_id)
+        if rival is not None and best.score - rival.score < lexical.min_margin:
+            contention_rejects += 1
+            candidates.append(
+                _settlement_candidate(
+                    view,
+                    best,
+                    profile,
+                    probability=best.score / len(claimants),
+                    verified=False,
+                    tolerances=tolerances,
+                    lexical=lexical,
+                    runner_up=None,
+                    extra=(_contention_evidence(view, best, rival, claimants, lexical),),
                 )
             )
             context.consume(view.settlement_id)
@@ -589,4 +735,6 @@ def run_tier3(
         names_scored=scored_count,
         rejected_below_score=below,
         rejected_on_margin=margin_rejects,
+        rejected_on_contention=contention_rejects,
+        settlements_already_referenced=already_referenced,
     )

@@ -157,7 +157,7 @@ produces byte-identical files — a property the test suite asserts.
 | `train` | 400 | fits the score blender |
 | `calibration` | 200 | fits isotonic calibration and selects `tau_high` — never evaluated on |
 | `test` | 300 | the demo default, and where every published number comes from |
-| `scale` | 5,000 | supported by the generator; **not benchmarked** |
+| `scale` | 5,000 | benchmarked by `ledgerloop scale`: precision **1.0000**, 0 false positives, 12,233 records in 7.4 s |
 
 ### Calibrate
 
@@ -218,6 +218,18 @@ python -m ledgerloop.cli eval --data data/generated/test-standard-42 \
     --sweep reports/sweep.json --llm-baseline reports/llm_baseline.json \
     --comparison reports/comparison.json --llm-report reports/llm_report.json \
     --out EVALUATION.md
+```
+
+The size curve is a separate command (`make scale`), not part of `eval`. It
+generates corpora far larger than any published number uses, and its throughput
+columns are the only figures this project writes that a rerun will not
+reproduce -- folding them into the document whose byte-identity is a test would
+break that test by design. It exits non-zero if any size produced a false
+positive, which is what keeps T3's two scale-only guards honest.
+
+```bash
+python -m ledgerloop.cli scale --calibration reports/calibration.json \
+    --out reports/scale.json
 ```
 
 `comparison` is the before/after study for a change to the reconciliation

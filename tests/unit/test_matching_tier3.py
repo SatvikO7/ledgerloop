@@ -573,3 +573,139 @@ class TestReportingSurfaceAndEdges:
         outcome = _t3(corpus(batches=[teacher, learner], bank_txns=rows))
         assert outcome.settlements_seen == 0
         assert outcome.candidates == ()
+
+
+class TestUniquenessRunsBothWays:
+    """The credit side of gate 3, and the settlement's own reference.
+
+    Both holes are invisible on a small corpus and open up on a large one: a
+    merchant's payouts are a few lakh apart on a base of crores, so two of its
+    settlements land inside each other's tolerance band as soon as it has enough
+    of them. Neither case can arise on the committed corpora, and both were
+    found by running the 5,000-order ``scale`` split -- see the module docstring.
+    """
+
+    @staticmethod
+    def _two_settlements_one_credit(*, second_net_offset: int = 0):
+        """Two payouts of one merchant, and a single credit both could be.
+
+        The teacher keeps its reference so T3 has a spelling to learn from. The
+        two learners lost theirs, and their nets are close enough that the one
+        surviving credit sits inside both tolerance bands.
+        """
+        teacher = batch(
+            "SETL-0001", utr="UTR2026031000001", amounts=(90_000,),
+            first_index=1, merchant_id="MRCH_0001",
+        )
+        left = batch(
+            "SETL-0002", utr="UTR2026031000002", amounts=(60_000, 40_000),
+            first_index=10, merchant_id="MRCH_0001",
+        )
+        right = batch(
+            "SETL-0003", utr="UTR2026031000003",
+            amounts=(60_000, 40_000 + second_net_offset),
+            first_index=20, merchant_id="MRCH_0001",
+        )
+        rows = [
+            bank_credit("BNK-00001", amount_minor=teacher.net_minor,
+                        utr=teacher.settlement.utr, merchant="RAZORPAY SOFTWARE PVT"),
+            bank_credit("BNK-00002", amount_minor=left.net_minor, utr=None,
+                        merchant="RZRPAY SFTWR P L"),
+        ]
+        return corpus(batches=[teacher, left, right], bank_txns=rows)
+
+    def test_a_credit_two_settlements_both_claim_is_refused(self):
+        outcome = _t3(self._two_settlements_one_credit())
+        assert outcome.rejected_on_contention == 2
+        assert outcome.settlements_resolved == 0
+        assert outcome.payment_links == 0
+
+    def test_the_contested_credit_is_left_in_the_pool(self):
+        """Refusing is not consuming. Nothing has explained this credit yet."""
+        context = MatchContext.from_ingest(self._two_settlements_one_credit())
+        run_tier3(context, TOLERANCES, LEXICAL)
+        assert context.consumed_settlements == {"SETL-0002", "SETL-0003"}
+        assert "BNK-00002" not in context.consumed_credits
+
+    def test_the_refusal_names_the_rival_settlement(self):
+        outcome = _t3(self._two_settlements_one_credit())
+        details = [
+            item.detail
+            for c in outcome.candidates
+            for item in c.evidence
+            if item.kind is EvidenceKind.NEGATIVE_EVIDENCE and "claimed by" in item.detail
+        ]
+        assert details
+        assert any("SETL-0002" in d and "SETL-0003" in d for d in details)
+
+    def test_a_contested_settlement_is_proposed_below_certainty(self):
+        """The uniform prior every tier here uses, over the claimants."""
+        outcome = _t3(self._two_settlements_one_credit())
+        assert all(c.calibrated_p < 1.0 for c in outcome.candidates)
+        assert all(not c.arithmetic_verified for c in outcome.candidates)
+
+    def test_a_settlement_far_enough_away_does_not_contest(self):
+        """The band is what makes it a contest; outside it there is only one claim."""
+        outcome = _t3(self._two_settlements_one_credit(second_net_offset=80_000))
+        assert outcome.rejected_on_contention == 0
+        assert outcome.settlements_resolved == 1
+
+    @staticmethod
+    def _split_with_one_keyed_tranche():
+        """A09 composed with A07 on one tranche only.
+
+        The payout went out in two tranches; one kept the settlement's UTR and
+        one lost it. T2 cannot close it -- the keyed tranche alone does not sum
+        to the net -- so the settlement is still open when T3 sees it. A
+        *different* settlement's payout sits inside the whole net's band.
+        """
+        teacher = batch(
+            "SETL-0001", utr="UTR2026031000001", amounts=(90_000,),
+            first_index=1, merchant_id="MRCH_0001",
+        )
+        split = batch(
+            "SETL-0002", utr="UTR2026031000002", amounts=(60_000, 40_000),
+            first_index=10, merchant_id="MRCH_0001",
+        )
+        rows = [
+            bank_credit("BNK-00001", amount_minor=teacher.net_minor,
+                        utr=teacher.settlement.utr, merchant="RAZORPAY SOFTWARE PVT"),
+            # One tranche, carrying the settlement's own reference.
+            bank_credit("BNK-00002", amount_minor=split.net_minor // 2,
+                        utr=split.settlement.utr, merchant="RZRPAY SFTWR P L"),
+            # Someone else's payout, the size of the *whole* net.
+            bank_credit("BNK-00003", amount_minor=split.net_minor, utr=None,
+                        merchant="RZRPAY SFTWR P L"),
+        ]
+        return corpus(batches=[teacher, split], bank_txns=rows)
+
+    def test_a_partly_referenced_settlement_is_not_matched_on_a_name(self):
+        """The regression for the twenty-two wrong links found at 5,000 orders.
+
+        Two settlements are held back, not one: the teacher's reference is on
+        BNK-00001 as well. In a full ladder T0 would have consumed it long
+        before T3 ran, and this test calls T3 on its own.
+        """
+        outcome = _t3(self._split_with_one_keyed_tranche())
+        assert outcome.settlements_already_referenced == 2
+        assert outcome.settlements_resolved == 0
+        assert _pairs(outcome.candidates) == set()
+
+    def test_the_foreign_credit_survives_for_a_tier_that_can_use_it(self):
+        context = MatchContext.from_ingest(self._split_with_one_keyed_tranche())
+        run_tier3(context, TOLERANCES, LEXICAL)
+        assert "BNK-00003" not in context.consumed_credits
+        assert "SETL-0002" not in context.consumed_settlements
+
+    def test_neither_guard_can_ever_add_a_link(self):
+        """Both only decline. Whatever T3 still asserts, it asserted before."""
+        for build in (
+            self._two_settlements_one_credit(),
+            self._split_with_one_keyed_tranche(),
+            keyed_and_stripped()[2],
+        ):
+            outcome = _t3(build)
+            assert outcome.payment_links <= outcome.settlements_resolved * 2
+            assert outcome.settlements_resolved + outcome.rejected_on_contention <= (
+                outcome.settlements_seen
+            )

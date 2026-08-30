@@ -397,10 +397,12 @@ def _merge_aggregation(
 def _merge_lexical(left: LexicalOutcome, right: LexicalOutcome) -> LexicalOutcome:
     """Accumulate two T3 passes.
 
-    Totals add; the *residual* counts (unsolved, without-profile) are taken
-    from the last pass, because they describe what is still open rather than
-    what happened -- summing them would double-count a settlement that stayed
-    open across passes.
+    Totals add; the *residual* counts (unsolved, without-profile,
+    already-referenced) are taken from the last pass, because they describe what
+    is still open rather than what happened -- summing them would double-count a
+    settlement that stayed open across passes. A settlement the bank has already
+    named is held back on every pass, so it is a residual count and not an event
+    one; ``rejected_on_contention`` *is* an event, and adds.
     """
     return LexicalOutcome(
         candidates=left.candidates + right.candidates,
@@ -416,6 +418,8 @@ def _merge_lexical(left: LexicalOutcome, right: LexicalOutcome) -> LexicalOutcom
         names_scored=left.names_scored + right.names_scored,
         rejected_below_score=left.rejected_below_score + right.rejected_below_score,
         rejected_on_margin=left.rejected_on_margin + right.rejected_on_margin,
+        rejected_on_contention=left.rejected_on_contention + right.rejected_on_contention,
+        settlements_already_referenced=right.settlements_already_referenced,
     )
 
 

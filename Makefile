@@ -92,6 +92,7 @@ ABLATION    := reports/ablation.json
 SWEEP       := reports/sweep.json
 B2          := reports/llm_baseline.json
 COMPARISON  := reports/comparison.json
+SCALE       := reports/scale.json
 LLM_REPORT  := reports/llm_report.json
 
 # Everything the fit and the ablation need: the demo corpus, the two fitting
@@ -175,6 +176,22 @@ comparison: calibrate sweep-data
 		--data $(SWEEP_DIRS) \
 		--calibration $(BUNDLE) \
 		--out $(COMPARISON)
+
+# Phase 2.6. The size curve, up to the `scale` split's 5,000 orders.
+#
+# NOT part of `eval`, for two reasons. It generates corpora far larger than any
+# published number uses, and its throughput columns are the only figures this
+# project writes that a second run will not reproduce -- so folding it into the
+# document whose byte-identity is a test would break that test by design.
+#
+# Precision is the column to read first. The first run of this target produced
+# 22 false positives at 5,000 orders and nothing at any smaller size; the guards
+# that closed them are in matching/tier3_lexical.py, and this target is the
+# measurement that keeps them closed. It exits non-zero on any false positive.
+scale: calibrate
+	$(PY) -m ledgerloop.cli scale \
+		--calibration $(BUNDLE) \
+		--out $(SCALE)
 
 # Phase 2.2. One measured run of the PRODUCTION LLM path -- prompts, cache,
 # budget, provider ladder, grounding gate, verify_arithmetic, cost ledger --

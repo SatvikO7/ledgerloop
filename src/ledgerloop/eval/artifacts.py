@@ -53,6 +53,8 @@ __all__ = [
     "LLMBaselineArtifact",
     "LLMReportArtifact",
     "RunScore",
+    "ScaleArtifact",
+    "ScalePoint",
     "SweepArtifact",
     "SweepGroup",
 ]
@@ -189,6 +191,75 @@ class SweepArtifact(_SavedArtifact):
             if group.difficulty == self.headline_difficulty:
                 return group
         return None
+
+
+class ScalePoint(_SavedArtifact):
+    """One corpus size, run once.
+
+    Quality and cost are kept in one row but they are not the same kind of
+    number and the report must not present them as if they were. Everything
+    down to ``false_positive_cost_minor`` is deterministic and reproduces
+    exactly on any machine; ``wall_clock_ms`` and ``records_per_second``
+    describe *this* machine on *this* run and reproduce nowhere. See
+    :class:`ScaleArtifact`.
+    """
+
+    orders: int
+    records: int
+    settlements: int
+    bank_rows: int
+
+    # Deterministic.
+    true_positives: int
+    false_positives: int
+    false_negatives: int
+    precision: float
+    recall: float
+    match_rate: float
+    exception_recall: float
+    false_positive_cost_minor: MinorUnits
+
+    # Measured, and only on the machine that ran it.
+    wall_clock_ms: int
+    generate_ms: int
+    records_per_second: float
+
+
+class ScaleArtifact(_SavedArtifact):
+    """The throughput run PLAN.md left as a stretch item, with its quality beside it.
+
+    **Why quality is here and not only throughput.** The question a scale run is
+    usually asked to answer is "how fast", and that was the item as written. It
+    is the less interesting half. Precision is this system's headline claim and
+    every published measurement of it comes from corpora of 60 to 400 orders; a
+    run at 5,000 is the first evidence that the claim survives a statement large
+    enough for two of a merchant's payouts to look alike. The first one found
+    twenty-two wrong links, so the answer was not free.
+
+    **Why the timings are quarantined in their own fields.** They are the only
+    numbers in any artefact this project writes that a second run will not
+    reproduce, and they carry a machine's identity rather than the system's.
+    ``eval/report.py`` keeps every such figure inside one labelled block for the
+    same reason; a document whose diff shows scheduler noise cannot be diffed
+    for anything else.
+    """
+
+    split: str
+    difficulty: str
+    seed: int
+    generator_version: str
+    tuning_hash: str
+    calibrated: bool
+    machine: str = Field(
+        description="What produced the timings. Present so a throughput figure "
+        "can never be read as a property of the system alone."
+    )
+    points: tuple[ScalePoint, ...]
+
+    @property
+    def largest(self) -> ScalePoint | None:
+        """The headline point: the biggest corpus that was run."""
+        return max(self.points, key=lambda p: p.orders) if self.points else None
 
 
 class LLMBaselineArtifact(_SavedArtifact):
