@@ -40,6 +40,35 @@ hold:
 3. **Name**, at or above ``min_score``, and beating the runner-up by
    ``min_margin``.
 
+WITHOUT A REFERENCE, THE AMOUNT *IS* THE IDENTITY CLAIM
+--------------------------------------------------------
+T0 and T1 match on a reference and then check the money, and their tolerance
+band absorbs fee rounding around an identity the reference has already proven.
+T3 has no reference. The amount is not a check on the match here -- it **is**
+the match, together with a merchant name that every batch of that merchant
+shares. An approximate identity claim, over a pool of same-merchant amounts, is
+exactly where a false positive comes from.
+
+That is decision 61's argument and this tier was not applying it. `find_tranche_set`
+targets ``[net, net]`` with no band for the same reason: a payout conserves money
+by construction, so an epsilon there would not absorb drift, it would admit sets
+that are merely close.
+
+Measured before it was written, over 49 corpora -- the 29 committed ones and the
+20 (size, seed) scale corpora:
+
+    delta == 0 :  543 correct,   0 wrong
+    delta != 0 :    0 correct,   1 wrong
+
+Every legitimate whole-net match is exact **to the paise**, and the one inexact
+match in the entire corpus family is the false positive: `SETL-0015` taking
+`BNK-00018` at 0.059% away, when that credit is a *tranche* of `SETL-0018`'s
+split payout. So the band was admitting exactly one thing, and it was wrong.
+
+The band still governs which credits are *considered* -- a near-miss rival must
+still be able to contest a credit, and throwing that evidence away is the
+mistake Phase 2.9 corrected. What exactness governs is the **assignment**.
+
 UNIQUENESS HAS TWO DIRECTIONS
 -----------------------------
 Gate 3's margin asks *one* question: does this settlement have two credits the
@@ -192,6 +221,7 @@ class LexicalOutcome:
     rejected_below_score: int = 0
     rejected_on_margin: int = 0
     rejected_on_contention: int = 0
+    rejected_inexact: int = 0
     settlements_already_referenced: int = 0
 
     @property
@@ -483,6 +513,29 @@ def _contention_evidence(
     )
 
 
+def _inexact_evidence(view: SettlementView, best: NameMatch) -> Evidence:
+    """Why a credit that cleared every gate is still not this settlement's.
+
+    The rupee figures are named because the whole refusal is the gap between
+    them: without a reference, "close" is not a match, it is a different amount.
+    """
+    delta = best.credit.credit_minor - view.net_minor
+    return Evidence(
+        kind=EvidenceKind.NEGATIVE_EVIDENCE,
+        detail=(
+            f"{best.credit.txn_id} credits {format_minor(best.credit.credit_minor)} "
+            f"against {view.settlement_id}'s net of {format_minor(view.net_minor)} -- "
+            f"{format_minor(abs(delta))} apart. The name and the date agree and the "
+            "reference is gone, so the amount is the only identity claim available, "
+            "and an amount that is merely close is not one. A payout conserves money "
+            "by construction; a credit that does not equal the net is a different "
+            "payout, or part of one"
+        ),
+        refs=(settlement_ref(view.settlement_id), bank_ref(best.credit.txn_id)),
+        amount_minor=best.credit.credit_minor,
+    )
+
+
 def _settlement_candidate(
     view: SettlementView,
     match: NameMatch,
@@ -601,7 +654,7 @@ def run_tier3(
     candidates: list[MatchCandidate] = []
     seen = resolved = ambiguous = unsolved = without_profile = 0
     credits_matched = payments_matched = scored_count = below = margin_rejects = 0
-    contention_rejects = already_referenced = 0
+    contention_rejects = already_referenced = inexact_rejects = 0
 
     # Pass 1 -- score, commit to nothing. The claim map has to be complete before
     # any credit is handed out, because contention is a property of the whole
@@ -724,6 +777,28 @@ def run_tier3(
             ambiguous += 1
             continue
 
+        # The money has to be exact -- see WITHOUT A REFERENCE, above. The band
+        # got this credit into the pool, where it could be contested; it does
+        # not get it assigned.
+        if best.credit.credit_minor != view.net_minor:
+            inexact_rejects += 1
+            candidates.append(
+                _settlement_candidate(
+                    view,
+                    best,
+                    profile,
+                    probability=best.score / 2.0,
+                    verified=False,
+                    tolerances=tolerances,
+                    lexical=lexical,
+                    runner_up=None,
+                    extra=(_inexact_evidence(view, best),),
+                )
+            )
+            context.consume(view.settlement_id)
+            ambiguous += 1
+            continue
+
         verified = view.gross_reconciles
         candidates.append(
             _settlement_candidate(
@@ -768,5 +843,6 @@ def run_tier3(
         rejected_below_score=below,
         rejected_on_margin=margin_rejects,
         rejected_on_contention=contention_rejects,
+        rejected_inexact=inexact_rejects,
         settlements_already_referenced=already_referenced,
     )

@@ -419,6 +419,7 @@ def _merge_lexical(left: LexicalOutcome, right: LexicalOutcome) -> LexicalOutcom
         rejected_below_score=left.rejected_below_score + right.rejected_below_score,
         rejected_on_margin=left.rejected_on_margin + right.rejected_on_margin,
         rejected_on_contention=left.rejected_on_contention + right.rejected_on_contention,
+        rejected_inexact=left.rejected_inexact + right.rejected_inexact,
         settlements_already_referenced=right.settlements_already_referenced,
     )
 

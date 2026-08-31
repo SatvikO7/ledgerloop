@@ -455,10 +455,10 @@ standard difficulty on Windows AMD64 / Python 3.11.9.
 
 | Orders | Records | Recall (5 seeds) | Match rate | False positives |
 |---|---|---|---|---|
-| 300 | 727 | 0.8971 ± **0.0980** | 0.8680 | 0 |
-| 1,000 | 2,448 | 0.8726 ± 0.0527 | 0.8413 | 0 |
-| 2,500 | 6,121 | 0.8646 ± 0.0197 | 0.8363 | 0 |
-| 5,000 | 12,233 | 0.8464 ± 0.0188 | 0.8187 | **7** (seed 45 only) |
+| 300 | 727 | 0.8971 ± **0.0980** | 0.8680 | **0** |
+| 1,000 | 2,448 | 0.8726 ± 0.0527 | 0.8413 | **0** |
+| 2,500 | 6,121 | 0.8646 ± 0.0197 | 0.8363 | **0** |
+| 5,000 | 12,233 | 0.8467 ± 0.0186 | 0.8190 | **0** |
 
 ```
 python -m ledgerloop.cli scale --calibration reports/calibration.json
@@ -476,10 +476,22 @@ generator caps merchants at twelve, so settlements per merchant rise 2.2 → 37.
 anomaly mix stays flat. The matcher was **not** changed to compensate for that.
 
 It also reported *precision held at every size*. That was true of seed 42 and false of seed
-45, which carried **17 false positives** at 5,000 orders. Ten were a real defect and are
-fixed (below); **seven remain**, and the benchmark now names the seed and exits non-zero
-rather than printing a green tick. Precision at 5,000 orders is 0.9983 on one seed in five,
-and 1.0000 on the other four.
+45, which carried **17 false positives** at 5,000 orders. All seventeen are now closed —
+ten by separating a settlement's right to *claim* a credit from its right to be *assigned*
+one, and the last seven by the rule below. **Precision is 1.0000 on every seed at every
+size, at ₹0 of wrong money.**
+
+**Without a reference, the amount *is* the identity claim.** T0 and T1 match on a reference
+and then check the money; their tolerance band absorbs fee rounding around an identity the
+reference already proved. T3 has no reference — the amount is the match, alongside a
+merchant name every batch of that merchant shares. Measured over 49 corpora: **543 of 543
+legitimate T3 whole-net matches are exact to the paise, and the single inexact one in the
+whole corpus family was the false positive** — a settlement taking a *tranche* of a
+different split payout, 0.059% away. So T3 now requires the credit to equal the net exactly.
+That is the argument the project had already made for `find_tranche_set` (a band there
+"would admit sets that are merely close"), applied to the other tier that matches on money
+alone. **A band was removed, not a threshold added**, and it cost no recall: 0.8464 → 0.8467
+at 5,000 orders, because the credit that had been taken wrongly was freed.
 
 Recall is really a **settlement resolution rate**: at every size, 100% of missing links
 belong to settlements that are *entirely* unresolved — there is not one partially-resolved
@@ -577,13 +589,12 @@ worth knowing before you look:
   denominator in the report — thirty records on seed 42 — and 30 of 30 does **not**
   demonstrate ≥ 0.95 from thirty records: the 95% Wilson interval is [0.8865, 1.0000] and
   the target sits inside it. The report calls that *undecided* rather than a pass.
-- **Precision is 1.0000 at every published size, and 0.9983 at 5,000 orders on one seed in
-  five.** Seven wrong links survive there, worth ₹1,37,860.04. T3 matches a settlement's
-  whole net onto a *tranche* of a different split payout when neither settlement carries a
-  reference anywhere. The two available fixes are both barred — re-ordering split completion
-  before T3 was measured and rejected, and computing tranche sets inside T3 would duplicate
-  it — so it is reported rather than forced, and `ledgerloop scale` exits non-zero while it
-  stands.
+- **T3's exactness rule is empirical on one generator.** In this corpus a payout equals its
+  net by construction and drift is injected on the ledger/PSP side, which is why 543 of 543
+  legitimate matches are exact. A real statement that credited a genuinely different amount
+  against an unreferenced settlement would now be **refused rather than matched** — recall
+  would fall and precision would hold, which is the trade this project makes everywhere
+  else, but it has not been tested against such data.
 - **The scale curve is four sizes at five seeds, on one machine, at one difficulty.** It is
   not a performance characterisation, and the throughput figures describe the machine that
   produced them. The 300-order end stays noisy (sd 0.0980) because ~27 settlements is a

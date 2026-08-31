@@ -410,7 +410,22 @@ class TestTheAmountAndDateGates:
         outcome = _t3(corpus(batches=[teacher, learner], bank_txns=rows))
         assert outcome.settlements_seen == 0
 
-    def test_a_drift_inside_the_band_still_matches(self):
+    def test_a_drift_inside_the_band_is_considered_and_then_refused(self):
+        """**This assertion was inverted in Phase 2.10, deliberately.**
+
+        It used to require that a 3-paise drift still *matched*, on the reading
+        that T3 inherits T1's tolerance band. Measured over 49 corpora, that
+        reading is wrong: 543 of 543 legitimate T3 whole-net matches are exact
+        to the paise, and the single inexact one in the whole corpus family is a
+        false positive. Without a reference the amount is the identity claim,
+        and an approximate identity claim is not one -- decision 61's argument,
+        which this tier had not been applying.
+
+        The test is kept rather than deleted because the *band* still matters
+        and is still asserted: the credit is admitted to the pool, where it can
+        be contested, and refused only at assignment. `settlements_seen` staying
+        1 is what distinguishes that from never being looked at.
+        """
         teacher, learner, _ = keyed_and_stripped()
         rows = [
             bank_credit("BNK-00001", amount_minor=teacher.net_minor,
@@ -418,7 +433,10 @@ class TestTheAmountAndDateGates:
             bank_credit("BNK-00002", amount_minor=learner.net_minor + 3,
                         utr=None, merchant="RZRPAY SFTWR P L"),
         ]
-        assert _t3(corpus(batches=[teacher, learner], bank_txns=rows)).settlements_resolved == 1
+        outcome = _t3(corpus(batches=[teacher, learner], bank_txns=rows))
+        assert outcome.settlements_seen == 1
+        assert outcome.settlements_resolved == 0
+        assert outcome.rejected_inexact == 1
 
     @pytest.mark.parametrize("days", [-7, 0, 7])
     def test_credits_inside_the_wider_window_are_matched(self, days):
@@ -832,3 +850,108 @@ class TestARefusedSettlementStillSpeaksForItsCredit:
         assert len(_pairs(_t3_ctx(wide).candidates)) <= len(
             _pairs(_t3_ctx(narrow).candidates)
         )
+
+
+class TestWithoutAReferenceTheAmountIsTheIdentityClaim:
+    """T3 assigns only on an exact net, and that is decision 61's rule, not a knob.
+
+    T0 and T1 match on a reference and then check the money: their tolerance band
+    absorbs fee rounding around an identity the reference already proved. T3 has
+    no reference, so the amount is not a check on the match -- it **is** the
+    match, alongside a merchant name every batch of that merchant shares. An
+    approximate identity claim over a pool of same-merchant amounts is precisely
+    where a false positive comes from, which is why `find_tranche_set` targets
+    ``[net, net]`` with no band at all.
+
+    Measured over 49 corpora before this was written -- the 29 committed ones and
+    the 20 (size, seed) scale corpora:
+
+        delta == 0 :  543 correct,   0 wrong
+        delta != 0 :    0 correct,   1 wrong
+
+    The band was admitting exactly one thing across the whole corpus family, and
+    it was the false positive: `SETL-0015` taking `BNK-00018` 0.059% away, when
+    that credit is a *tranche* of `SETL-0018`'s split payout.
+    """
+
+    @staticmethod
+    def _near_miss(offset: int):
+        """A credit inside the band but not equal to the net.
+
+        `offset` of 0 is the legitimate case; anything else is the shape that
+        produced the seven wrong links.
+        """
+        teacher = batch(
+            "SETL-0001", utr="UTR2026031000001", amounts=(90_000,),
+            first_index=1, merchant_id="MRCH_0001",
+        )
+        learner = batch(
+            "SETL-0002", utr="UTR2026031000002", amounts=(60_000, 40_000),
+            first_index=10, merchant_id="MRCH_0001",
+        )
+        rows = [
+            bank_credit("BNK-00001", amount_minor=teacher.net_minor,
+                        utr=teacher.settlement.utr, merchant="RAZORPAY SOFTWARE PVT"),
+            bank_credit("BNK-00002", amount_minor=learner.net_minor + offset,
+                        utr=None, merchant="RZRPAY SFTWR P L"),
+        ]
+        return corpus(batches=[teacher, learner], bank_txns=rows)
+
+    def test_an_exact_credit_is_still_matched(self):
+        """The tier must keep doing its job; this is the case it exists for."""
+        outcome = _t3(self._near_miss(0))
+        assert outcome.settlements_resolved == 1
+        assert outcome.rejected_inexact == 0
+        assert outcome.payment_links == 2
+
+    @pytest.mark.parametrize("offset", [1, -1, 50, -50, 400])
+    def test_a_credit_inside_the_band_but_not_equal_is_refused(self, offset):
+        """One paise out is out. There is no near-enough without a reference."""
+        outcome = _t3(self._near_miss(offset))
+        assert outcome.rejected_inexact == 1
+        assert outcome.settlements_resolved == 0
+        assert _pairs(outcome.candidates) == set()
+
+    def test_the_refusal_names_both_amounts_and_the_gap(self):
+        """A controller has to be able to see why, in rupees."""
+        outcome = _t3(self._near_miss(400))
+        details = [
+            item.detail
+            for c in outcome.candidates
+            for item in c.evidence
+            if item.kind is EvidenceKind.NEGATIVE_EVIDENCE and "apart" in item.detail
+        ]
+        assert details
+        assert any("identity claim" in d for d in details)
+
+    def test_an_inexact_refusal_is_never_auto_matchable(self):
+        outcome = _t3(self._near_miss(400))
+        assert all(not c.arithmetic_verified for c in outcome.candidates)
+        assert all(
+            c.calibrated_p is not None and c.calibrated_p < 1.0
+            for c in outcome.candidates
+        )
+
+    def test_the_credit_is_left_for_a_tier_that_can_account_for_it(self):
+        """The seven wrong links were a *tranche* of somebody else's split.
+
+        Refusing must not also consume it: the tier that can add tranches up
+        still needs it in the pool.
+        """
+        context = MatchContext.from_ingest(self._near_miss(400))
+        run_tier3(context, TOLERANCES, LEXICAL)
+        assert "BNK-00002" not in context.consumed_credits
+
+    def test_the_band_still_governs_what_is_considered(self):
+        """Exactness governs the assignment, not the pool.
+
+        A near-miss credit must still enter and still be contestable -- throwing
+        that evidence away is the mistake Phase 2.9 corrected. So a credit far
+        outside the band is not even seen, while one inside it is seen and then
+        refused.
+        """
+        far = _t3(self._near_miss(10_000_000))
+        assert far.rejected_inexact == 0, "a credit outside the band never enters the pool"
+        assert far.settlements_resolved == 0
+        near = _t3(self._near_miss(50))
+        assert near.rejected_inexact == 1, "a credit inside the band enters, then is refused"

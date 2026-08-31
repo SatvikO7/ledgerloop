@@ -187,11 +187,11 @@ comparison: calibrate sweep-data
 # Precision is the column to read first, and this target runs FIVE SEEDS at each
 # size because one could not be trusted to show it: the single-seed version
 # printed `precision held at every size` while seed 45 carried 17 false
-# positives at 5,000 orders. Ten were a real defect and are fixed; seven remain.
+# positives at 5,000 orders.
 #
-# So this target currently EXITS NON-ZERO, and that is deliberate. A gate that
-# went green over a known defect would be worth less than no gate at all. It
-# will pass again when the remaining case is closed -- see README's Limitations.
+# All seventeen are now closed -- ten by Phase 2.9's claim/assignment split and
+# seven by Phase 2.10's exactness rule -- so this target passes again, and it
+# exits non-zero the moment a false positive returns at any size on any seed.
 scale: calibrate
 	$(PY) -m ledgerloop.cli scale \
 		--calibration $(BUNDLE) \

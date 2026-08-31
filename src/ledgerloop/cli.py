@@ -981,6 +981,13 @@ def _negative_counters(run: SystemRun) -> tuple[tuple[str, str, int], ...]:
             matched.lexical.rejected_on_contention,
         ),
         (
+            "T3 rejected as inexact",
+            "the name and date agreed but the credit did not equal the settlement's "
+            "net to the paise; with no reference, the amount is the identity claim "
+            "and an approximate one is not a match",
+            matched.lexical.rejected_inexact,
+        ),
+        (
             "T3 settlements already referenced",
             "the bank had written the settlement's own UTR on a credit, so the "
             "statement has already said where the payout went; a whole-net match "

@@ -560,6 +560,7 @@ Rounding budget committed this run: ₹0.00.
 | T3 rejected below score | 0 | the best merchant-name match did not reach the similarity gate |
 | T3 rejected on margin | 0 | the best match did not beat the runner-up by enough; two merchants the scorer cannot separate are an ambiguity, not a winner |
 | T3 rejected on contention | 0 | two settlements of the same merchant both had a claim on the credit; their nets agree inside the band and the name is the same string, so no lexical reading says which one it paid |
+| T3 rejected as inexact | 0 | the name and date agreed but the credit did not equal the settlement's net to the paise; with no reference, the amount is the identity claim and an approximate one is not a match |
 | T3 settlements already referenced | 0 | the bank had written the settlement's own UTR on a credit, so the statement has already said where the payout went; a whole-net match on a name would contradict it |
 | T4 inferences made | 0 | path closure and sibling completion; zero here because every earlier tier matches at settlement granularity, so the partial assignments they exist to finish never arise |
 | Unmatchable records (the floor) | 69 | irreconcilable from the three sources alone, across **every** record type; excluded from the match-rate denominator and reported on their own line. The exception queue's own unmatchable count is smaller because the outgoing bank rows sit outside its unit entirely -- the two figures plus that count add up, and both appear above |
@@ -622,13 +623,13 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 61 ms |
-| Throughput | 12,164 records/sec |
-| T0_EXACT | 16 ms |
-| T1_TOLERANCE | 2 ms |
+| Wall clock | 75 ms |
+| Throughput | 9,893 records/sec |
+| T0_EXACT | 22 ms |
+| T1_TOLERANCE | 4 ms |
 | T2_AGGREGATION | 5 ms |
-| T3_FUZZY | 3 ms |
-| T4_GRAPH | 21 ms |
+| T3_FUZZY | 4 ms |
+| T4_GRAPH | 25 ms |
 
 ## B0 -- Exact join on UTR (narration regex -> settlement.utr -> its payments)
 
@@ -736,8 +737,8 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 5 ms |
-| Throughput | 148,400 records/sec |
+| Wall clock | 15 ms |
+| Throughput | 49,467 records/sec |
 
 ## B1 -- Exact join + fuzzy reference recovery + nearest-amount match
 
@@ -845,5 +846,5 @@ data. Everything above is deterministic.
 
 | | |
 |---|---|
-| Wall clock | 4 ms |
-| Throughput | 185,500 records/sec |
+| Wall clock | 5 ms |
+| Throughput | 148,400 records/sec |
