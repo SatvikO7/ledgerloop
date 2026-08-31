@@ -610,7 +610,19 @@ def run_tier3(
     # not depend on the order the settlements are visited in.
     ranked: list[tuple[SettlementView, MerchantProfile, list[NameMatch]]] = []
     claims: dict[str, list[_Claim]] = {}
-    for view in list(context.open_settlements()):
+    # Who may *claim*, and who may be *assigned*, are different sets.
+    #
+    # A claim is evidence that a credit is spoken for; an assignment is an act.
+    # A settlement that is open may do both. One the ladder **refused** may only
+    # claim -- it still has an outstanding claim on the credit it was refused
+    # over, and that is exactly the evidence contention needs. One that was
+    # **resolved** may do neither: its money is accounted for, so a further
+    # claim would be a refusal manufactured out of nothing.
+    open_ids = {view.settlement_id for view in context.open_settlements()}
+    claimant_ids = open_ids | context.refused_settlements
+    for view in context.settlements:
+        if view.settlement_id not in claimant_ids:
+            continue
         merchant = context.merchant_of(view)
         profile = master.get(merchant) if merchant is not None else None
         if profile is None or not profile:
@@ -618,18 +630,38 @@ def run_tier3(
             continue
         if not view.payments or view.net_minor <= 0:
             continue
-        if view.utr is not None and context.credits_by_utr.get(view.utr):
-            # The bank has written this settlement's UTR on a credit, so it has
-            # already said where this payout went. See ALREADY-REFERENCED, above.
-            already_referenced += 1
-            continue
 
         pool = candidate_credits(view, context, tolerances, lexical)
         if not pool:
             continue
 
-        seen += 1
         scored, examined, rejected = rank_credits(view, profile, pool, lexical)
+
+        # A settlement the bank has already named is not T3's work -- see
+        # ALREADY-REFERENCED, above -- so it is never *assigned* a credit. It
+        # still **claims** one, and that distinction is the whole point: its
+        # claim is evidence about the credit, not a request for it.
+        #
+        # Dropping the claim as well is what let a false positive through at
+        # 5,000 orders on seed 45. SETL-0231's own UTR sat on BNK-01528, so this
+        # gate excluded it entirely; it therefore never claimed BNK-00231, whose
+        # amount equalled its net **to the paise**; contention below saw a single
+        # claimant and handed that credit to a different settlement 0.03% away.
+        # The gate meant to protect precision had removed the only evidence the
+        # contention test needed.
+        assignable = view.settlement_id in open_ids and not (
+            view.utr is not None and context.credits_by_utr.get(view.utr)
+        )
+        if not assignable:
+            if view.settlement_id in open_ids:
+                already_referenced += 1
+            for match in scored:
+                claims.setdefault(match.credit.txn_id, []).append(
+                    _Claim(settlement_id=view.settlement_id, score=match.score)
+                )
+            continue
+
+        seen += 1
         scored_count += examined
         below += rejected
 

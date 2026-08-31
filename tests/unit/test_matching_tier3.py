@@ -38,6 +38,11 @@ def _t3(ingest, lexical: LexicalMatching = LEXICAL):
     return run_tier3(MatchContext.from_ingest(ingest), TOLERANCES, lexical)
 
 
+def _t3_ctx(context, lexical: LexicalMatching = LEXICAL):
+    """Run T3 against a context the caller has already manipulated."""
+    return run_tier3(context, TOLERANCES, lexical)
+
+
 def _pairs(candidates):
     return {(c.source_ref.key, c.target_ref.key) for c in candidates if c.is_evaluable}
 
@@ -682,12 +687,15 @@ class TestUniquenessRunsBothWays:
     def test_a_partly_referenced_settlement_is_not_matched_on_a_name(self):
         """The regression for the twenty-two wrong links found at 5,000 orders.
 
-        Two settlements are held back, not one: the teacher's reference is on
-        BNK-00001 as well. In a full ladder T0 would have consumed it long
-        before T3 ran, and this test calls T3 on its own.
+        The counter reads **1**, not 2. Phase 2.9 moved this gate to *after* the
+        candidate pool is built, so that a settlement it holds back can still
+        register its claims. A consequence is that the counter now measures what
+        it says: settlements suppressed **despite having a viable candidate** --
+        the teacher has no pool of its own and was never a candidate for
+        anything, so counting it was noise.
         """
         outcome = _t3(self._split_with_one_keyed_tranche())
-        assert outcome.settlements_already_referenced == 2
+        assert outcome.settlements_already_referenced == 1
         assert outcome.settlements_resolved == 0
         assert _pairs(outcome.candidates) == set()
 
@@ -709,3 +717,118 @@ class TestUniquenessRunsBothWays:
             assert outcome.settlements_resolved + outcome.rejected_on_contention <= (
                 outcome.settlements_seen
             )
+
+
+class TestARefusedSettlementStillSpeaksForItsCredit:
+    """Claiming is evidence; assignment is an act. They are different rights.
+
+    Phase 2.6 built the contention test over `context.open_settlements()`, which
+    quietly tied both rights to the same condition. A settlement the ladder had
+    already **refused** was therefore invisible: it is consumed, so it could not
+    claim, so contention saw a single claimant and handed its credit away.
+
+    Phase 2.9 found that at 5,000 orders on seed 45. `SETL-0231` was refused by
+    T0 as contested and consumed; `BNK-00231`'s amount equalled its net **to the
+    paise**; and T3 gave that credit to a different settlement 0.03% away, at
+    `p = 1.0`, for 10 wrong links.
+
+    A **resolved** settlement is deliberately not a claimant: its money is
+    accounted for, so a claim from it would manufacture a refusal out of
+    nothing. That distinction is what makes the fix cost no recall.
+    """
+
+    @staticmethod
+    def _teacher():
+        """A keyed batch, so T3 has a spelling to learn the merchant from."""
+        return batch(
+            "SETL-0001", utr="UTR2026031000001", amounts=(90_000,),
+            first_index=1, merchant_id="MRCH_0001",
+        )
+
+    def _one_credit_two_settlements(self):
+        """A credit that exactly fits one settlement and merely suits another.
+
+        `owner` is a paise-exact fit. `rival` is inside the tolerance band and
+        nothing else. If the owner cannot claim, the rival takes it.
+        """
+        teacher = self._teacher()
+        owner = batch(
+            "SETL-0002", utr="UTR2026031000002", amounts=(60_000, 40_000),
+            first_index=10, merchant_id="MRCH_0001",
+        )
+        rival = batch(
+            "SETL-0003", utr="UTR2026031000003", amounts=(60_000, 40_050),
+            first_index=20, merchant_id="MRCH_0001",
+        )
+        rows = [
+            bank_credit("BNK-00001", amount_minor=teacher.net_minor,
+                        utr=teacher.settlement.utr, merchant="RAZORPAY SOFTWARE PVT"),
+            bank_credit("BNK-00002", amount_minor=owner.net_minor, utr=None,
+                        merchant="RZRPAY SFTWR P L"),
+        ]
+        return corpus(batches=[teacher, owner, rival], bank_txns=rows)
+
+    def test_a_refused_settlement_still_contests_its_credit(self):
+        """The regression for the 10 wrong links at 5,000 orders."""
+        context = MatchContext.from_ingest(self._one_credit_two_settlements())
+        # The ladder refuses SETL-0002 and removes it from the pool without
+        # claiming anything -- exactly what T0 did to SETL-0231 on seed 45.
+        context.consume("SETL-0002")
+        outcome = _t3_ctx(context)
+        assert outcome.rejected_on_contention >= 1
+        assert _pairs(outcome.candidates) == set()
+
+    def test_a_refusal_is_recorded_apart_from_a_resolution(self):
+        """`consume` with no credits is a refusal; with credits it is not."""
+        context = MatchContext.from_ingest(self._one_credit_two_settlements())
+        context.consume("SETL-0002")
+        context.consume("SETL-0003", ["BNK-00002"])
+        assert "SETL-0002" in context.refused_settlements
+        assert "SETL-0003" not in context.refused_settlements
+        assert {"SETL-0002", "SETL-0003"} <= context.consumed_settlements
+
+    def test_a_resolved_settlement_does_not_manufacture_contention(self):
+        """The other half, and the reason the fix costs no recall.
+
+        A settlement whose money is already explained has no further claim. If
+        it were allowed one, every resolved batch would start refusing credits
+        that merely fell inside its band.
+        """
+        teacher = self._teacher()
+        resolved = batch(
+            "SETL-0002", utr="UTR2026031000002", amounts=(60_000, 40_000),
+            first_index=10, merchant_id="MRCH_0001",
+        )
+        target = batch(
+            "SETL-0003", utr="UTR2026031000003", amounts=(60_000, 40_000),
+            first_index=20, merchant_id="MRCH_0001",
+        )
+        rows = [
+            bank_credit("BNK-00001", amount_minor=teacher.net_minor,
+                        utr=teacher.settlement.utr, merchant="RAZORPAY SOFTWARE PVT"),
+            bank_credit("BNK-00002", amount_minor=target.net_minor, utr=None,
+                        merchant="RZRPAY SFTWR P L"),
+        ]
+        context = MatchContext.from_ingest(
+            corpus(batches=[teacher, resolved, target], bank_txns=rows)
+        )
+        # SETL-0002 is resolved against a credit of its own, so it is spent.
+        context.consume("SETL-0002", ["BNK-00009"])
+        outcome = _t3_ctx(context)
+        assert outcome.settlements_resolved == 1
+        assert outcome.rejected_on_contention == 0
+
+    def test_claiming_can_only_ever_make_the_tier_decline(self):
+        """The safety argument, asserted rather than reasoned about.
+
+        Widening the claim set adds claims and removes none, so contention can
+        only fire more often. A tier that declines more cannot assert a link it
+        would not otherwise have asserted.
+        """
+        built = self._one_credit_two_settlements()
+        wide = MatchContext.from_ingest(built)
+        wide.consume("SETL-0002")
+        narrow = MatchContext.from_ingest(built)
+        assert len(_pairs(_t3_ctx(wide).candidates)) <= len(
+            _pairs(_t3_ctx(narrow).candidates)
+        )

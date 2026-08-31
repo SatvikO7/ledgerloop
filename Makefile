@@ -184,10 +184,14 @@ comparison: calibrate sweep-data
 # project writes that a second run will not reproduce -- so folding it into the
 # document whose byte-identity is a test would break that test by design.
 #
-# Precision is the column to read first. The first run of this target produced
-# 22 false positives at 5,000 orders and nothing at any smaller size; the guards
-# that closed them are in matching/tier3_lexical.py, and this target is the
-# measurement that keeps them closed. It exits non-zero on any false positive.
+# Precision is the column to read first, and this target runs FIVE SEEDS at each
+# size because one could not be trusted to show it: the single-seed version
+# printed `precision held at every size` while seed 45 carried 17 false
+# positives at 5,000 orders. Ten were a real defect and are fixed; seven remain.
+#
+# So this target currently EXITS NON-ZERO, and that is deliberate. A gate that
+# went green over a known defect would be worth less than no gate at all. It
+# will pass again when the remaining case is closed -- see README's Limitations.
 scale: calibrate
 	$(PY) -m ledgerloop.cli scale \
 		--calibration $(BUNDLE) \

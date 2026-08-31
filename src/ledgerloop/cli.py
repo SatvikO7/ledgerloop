@@ -60,7 +60,7 @@ from ledgerloop.agent.runner import run_graph
 from ledgerloop.agent.store import RUNS_ROOT
 from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
 from ledgerloop.eval.ablation import ABLATION_LADDERS, AblationArtifact, run_ablation
-from ledgerloop.eval.artifacts import ComparisonArtifact, LLMReportArtifact
+from ledgerloop.eval.artifacts import ComparisonArtifact, LLMReportArtifact, ScalePoint
 from ledgerloop.eval.baselines import run_b0, run_b1
 from ledgerloop.eval.comparison import COMPARABLE, run_comparison
 from ledgerloop.eval.harness import (
@@ -78,7 +78,11 @@ from ledgerloop.eval.llm_report import run_llm_report
 from ledgerloop.eval.metrics import evaluate
 from ledgerloop.eval.offline_provider import OFFLINE_PROVIDER_NAME, OfflineReasoner
 from ledgerloop.eval.report import EvaluatedRun, render_report, write_report
-from ledgerloop.eval.scale import DEFAULT_SCALE_SIZES, run_scale
+from ledgerloop.eval.scale import (
+    DEFAULT_SCALE_SEEDS,
+    DEFAULT_SCALE_SIZES,
+    run_scale,
+)
 from ledgerloop.eval.sweep import SweepArtifact, run_sweep
 from ledgerloop.eval.truth_io import load_ground_truth, load_manifest
 from ledgerloop.fitting import FittingError, fit_from_corpora, harvest_corpora
@@ -523,7 +527,18 @@ def _build_parser() -> argparse.ArgumentParser:
         + "). The small end is the size of `test`, so the curve is anchored to "
         "the corpus every published number comes from.",
     )
-    scale.add_argument("--seed", type=int, default=42, help="RNG seed for every size")
+    scale.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_SCALE_SEEDS),
+        help="seeds to run every size at (default: "
+        + " ".join(str(s) for s in DEFAULT_SCALE_SEEDS)
+        + "). More than one, because a single-seed curve cannot tell a trend "
+        "from a draw -- recall at 300 orders spans 0.74 to 0.98 across these "
+        "five, and a one-seed curve reported `precision held at every size` "
+        "while a second seed carried 17 false positives at 5,000.",
+    )
     scale.add_argument(
         "--difficulty",
         type=Difficulty,
@@ -1341,7 +1356,7 @@ def _run_scale(args: argparse.Namespace) -> int:
             args.data_dir,
             sizes=args.sizes,
             bundle=bundle,
-            seed=args.seed,
+            seeds=args.seeds,
             difficulty=args.difficulty,
             regenerate=args.regenerate,
         )
@@ -1350,26 +1365,49 @@ def _run_scale(args: argparse.Namespace) -> int:
         return 1
     artifact.save(args.out)
 
-    print(f"scale curve · seed {artifact.seed} · {artifact.difficulty}")
+    seeds = sorted({point.seed for point in artifact.points})
+    print(f"scale curve · {len(seeds)} seed(s) {seeds} · {artifact.difficulty}")
     print(f"  machine: {artifact.machine}")
-    print("  orders   records  precision   recall  match rate    FP   wall  rec/s")
+    print(
+        "  orders   records     recall (mean +/- sd)   match rate    FP   "
+        "rec/s  seeds"
+    )
+    by_size: dict[int, list[ScalePoint]] = {}
     for point in artifact.points:
+        by_size.setdefault(point.orders, []).append(point)
+    for orders in sorted(by_size):
+        group = by_size[orders]
+        recalls = [p.recall for p in group]
+        mean = sum(recalls) / len(recalls)
+        # Population sd would understate the spread this table exists to show.
+        sd = (
+            (sum((r - mean) ** 2 for r in recalls) / (len(recalls) - 1)) ** 0.5
+            if len(recalls) > 1
+            else 0.0
+        )
+        rates = [p.match_rate for p in group]
         print(
-            f"  {point.orders:6d}  {point.records:8d}     "
-            f"{point.precision:.4f}   {point.recall:.4f}      "
-            f"{point.match_rate:.4f}  {point.false_positives:4d}  "
-            f"{point.wall_clock_ms / 1000:5.1f}s  {point.records_per_second:,.0f}"
+            f"  {orders:6d}  {group[0].records:8d}     "
+            f"{mean:.4f} +/- {sd:.4f}        "
+            f"{sum(rates) / len(rates):.4f}  {sum(p.false_positives for p in group):4d}  "
+            f"{sum(p.records_per_second for p in group) / len(group):6,.0f}  "
+            f"{len(group):5d}"
         )
 
     dirty = [p for p in artifact.points if p.false_positives]
     if dirty:
+        # Named by seed, because that is what a reader has to reproduce. A
+        # single-seed curve once printed the clean line below while a seed it
+        # never ran carried 17 wrong links.
         print(
             "  FALSE POSITIVES at "
-            + ", ".join(f"{p.orders} orders ({p.false_positives})" for p in dirty),
+            + ", ".join(
+                f"{p.orders} orders seed {p.seed} ({p.false_positives})" for p in dirty
+            ),
             file=sys.stderr,
         )
     else:
-        print("  precision held at every size ✓")
+        print(f"  precision held at every size on all {len(seeds)} seed(s) ✓")
     print(f"  wrote {args.out}")
     return 0 if not dirty else 1
 

@@ -449,22 +449,43 @@ block of measured timings.
 
 ### Scale
 
-`ledgerloop scale` walks a series of corpus sizes and reports quality and cost side by
-side. It writes `reports/scale.json`; the figures below are seed 42, standard difficulty,
-on Windows AMD64 / Python 3.11.9.
+`ledgerloop scale` walks a series of corpus sizes at **five seeds each** and reports
+quality and cost side by side. It writes `reports/scale.json`; the figures below are
+standard difficulty on Windows AMD64 / Python 3.11.9.
 
-| Orders | Records | Precision | Recall | Match rate | False positives | Wall clock | Records/sec |
-|---|---|---|---|---|---|---|---|
-| 300 | 727 | **1.0000** | 0.9628 | 0.9377 | 0 | 0.1 s | 6,527 |
-| 1,000 | 2,448 | **1.0000** | 0.8745 | 0.8478 | 0 | 0.5 s | 4,957 |
-| 2,500 | 6,121 | **1.0000** | 0.8857 | 0.8603 | 0 | 2.0 s | 3,123 |
-| 5,000 | 12,233 | **1.0000** | 0.8532 | 0.8273 | 0 | 7.4 s | 1,646 |
+| Orders | Records | Recall (5 seeds) | Match rate | False positives |
+|---|---|---|---|---|
+| 300 | 727 | 0.8971 ± **0.0980** | 0.8680 | 0 |
+| 1,000 | 2,448 | 0.8726 ± 0.0527 | 0.8413 | 0 |
+| 2,500 | 6,121 | 0.8646 ± 0.0197 | 0.8363 | 0 |
+| 5,000 | 12,233 | 0.8464 ± 0.0188 | 0.8187 | **7** (seed 45 only) |
 
 ```
 python -m ledgerloop.cli scale --calibration reports/calibration.json
 ```
 
-**Precision holds at every size, and it did not the first time.** Throughput was the
+**The curve used to run one seed, and both of its headline claims were wrong.**
+
+It reported recall falling 0.9628 → 0.8532 between 300 and 5,000 orders. Across five seeds,
+recall at 300 orders spans **0.7407 to 0.9796** — the 0.9628 was seed 42 near the top of its
+own spread. Corrected, the fall is 0.8971 → 0.8464, and the standard deviation collapses
+from 0.0980 to 0.0188 as the corpus grows, because 300 orders is only ~27 settlements and
+one dead settlement moves recall by ~3.7 points. **More than half the advertised drop was
+sampling noise.** What remains is attributable to corpus *shape* rather than difficulty: the
+generator caps merchants at twelve, so settlements per merchant rise 2.2 → 37.7 while the
+anomaly mix stays flat. The matcher was **not** changed to compensate for that.
+
+It also reported *precision held at every size*. That was true of seed 42 and false of seed
+45, which carried **17 false positives** at 5,000 orders. Ten were a real defect and are
+fixed (below); **seven remain**, and the benchmark now names the seed and exits non-zero
+rather than printing a green tick. Precision at 5,000 orders is 0.9983 on one seed in five,
+and 1.0000 on the other four.
+
+Recall is really a **settlement resolution rate**: at every size, 100% of missing links
+belong to settlements that are *entirely* unresolved — there is not one partially-resolved
+settlement anywhere.
+
+**Precision holds at every size on seed 42, and it did not the first time.** Throughput was the
 stated goal of this run and turned out to be the less interesting half. Every published
 precision figure in this project comes from 60 to 400 orders, and the first 5,000-order
 run produced **22 false positives** at `p = 1.0` — the one failure mode the architecture
@@ -556,9 +577,17 @@ worth knowing before you look:
   denominator in the report — thirty records on seed 42 — and 30 of 30 does **not**
   demonstrate ≥ 0.95 from thirty records: the 95% Wilson interval is [0.8865, 1.0000] and
   the target sits inside it. The report calls that *undecided* rather than a pass.
-- **The scale curve is four points on one machine, at one seed.** It is enough to show
-  that precision holds and that the growth is super-linear; it is not a performance
-  characterisation, and the throughput figures describe the machine that produced them.
+- **Precision is 1.0000 at every published size, and 0.9983 at 5,000 orders on one seed in
+  five.** Seven wrong links survive there, worth ₹1,37,860.04. T3 matches a settlement's
+  whole net onto a *tranche* of a different split payout when neither settlement carries a
+  reference anywhere. The two available fixes are both barred — re-ordering split completion
+  before T3 was measured and rejected, and computing tranche sets inside T3 would duplicate
+  it — so it is reported rather than forced, and `ledgerloop scale` exits non-zero while it
+  stands.
+- **The scale curve is four sizes at five seeds, on one machine, at one difficulty.** It is
+  not a performance characterisation, and the throughput figures describe the machine that
+  produced them. The 300-order end stays noisy (sd 0.0980) because ~27 settlements is a
+  small sample; that is inherent, not fixable by more careful measurement.
 - **CI has run green once, on the commit that introduced it.** `.github/workflows/ci.yml`
   runs the same three commands as `make check` on push and pull request. The badge above
   reports the latest run; note the repository is private, so the badge renders only for

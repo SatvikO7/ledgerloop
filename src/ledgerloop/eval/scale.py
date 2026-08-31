@@ -52,7 +52,12 @@ from ledgerloop.generator.generate import generate_to_disk
 from ledgerloop.matching.calibration import CalibrationBundle
 from ledgerloop.models.enums import Difficulty, SplitName
 
-__all__ = ["DEFAULT_SCALE_SIZES", "describe_machine", "run_scale"]
+__all__ = [
+    "DEFAULT_SCALE_SEEDS",
+    "DEFAULT_SCALE_SIZES",
+    "describe_machine",
+    "run_scale",
+]
 
 #: The sizes the benchmark walks by default.
 #:
@@ -61,6 +66,20 @@ __all__ = ["DEFAULT_SCALE_SIZES", "describe_machine", "run_scale"]
 #: number comes from, so it anchors the curve to a figure that is already known
 #: and makes a regression at the small end impossible to miss.
 DEFAULT_SCALE_SIZES: tuple[int, ...] = (300, 1_000, 2_500, 5_000)
+
+#: The seeds every size is run at.
+#:
+#: More than one, because a single-seed curve cannot tell a trend from a draw --
+#: and because it hid a precision failure. Phase 2.9 ran five seeds and found
+#: recall at 300 orders spanning **0.7407 to 0.9796**: the published 0.9628 was
+#: seed 42 near the top of its own spread, and most of the apparent "drop to
+#: 5,000 orders" was that spread rather than scale. The same five seeds found 17
+#: false positives at 5,000 on seed 45, on a curve that had been reporting
+#: *precision held at every size* for months.
+#:
+#: The same seeds PLAN.md 9.4 uses elsewhere, so the scale curve is sampled the
+#: way every other published figure in this project already is.
+DEFAULT_SCALE_SEEDS: tuple[int, ...] = (42, 43, 44, 45, 46)
 
 
 def describe_machine() -> str:
@@ -73,7 +92,7 @@ def run_scale(
     *,
     sizes: Sequence[int] = DEFAULT_SCALE_SIZES,
     bundle: CalibrationBundle | None = None,
-    seed: int = 42,
+    seeds: Sequence[int] = DEFAULT_SCALE_SEEDS,
     difficulty: Difficulty = Difficulty.STANDARD,
     regenerate: bool = False,
 ) -> ScaleArtifact:
@@ -91,6 +110,8 @@ def run_scale(
     """
     if not sizes:
         raise ValueError("a scale run needs at least one size")
+    if not seeds:
+        raise ValueError("a scale run needs at least one seed")
     if any(size <= 0 for size in sizes):
         raise ValueError(f"corpus sizes must be positive; got {tuple(sizes)}")
 
@@ -98,51 +119,53 @@ def run_scale(
     versions: set[str] = set()
     hashes: set[str] = set()
     for size in sorted(sizes):
-        directory = data_dir / f"scale-{difficulty.value}-{seed}-n{size}"
-        config = GeneratorConfig(
-            split=SplitName.SCALE, difficulty=difficulty, seed=seed, order_count=size
-        )
-        generate_ms = 0
-        if regenerate or not directory.exists():
+        for seed in sorted(seeds):
+            directory = data_dir / f"scale-{difficulty.value}-{seed}-n{size}"
+            config = GeneratorConfig(
+                split=SplitName.SCALE, difficulty=difficulty, seed=seed, order_count=size
+            )
+            generate_ms = 0
+            if regenerate or not directory.exists():
+                started = time.perf_counter()
+                generate_to_disk(config, directory)
+                generate_ms = int((time.perf_counter() - started) * 1000)
+
             started = time.perf_counter()
-            generate_to_disk(config, directory)
-            generate_ms = int((time.perf_counter() - started) * 1000)
+            run = run_system(directory, bundle=bundle, measure_calibration_quality=False)
+            elapsed = time.perf_counter() - started
 
-        started = time.perf_counter()
-        run = run_system(directory, bundle=bundle, measure_calibration_quality=False)
-        elapsed = time.perf_counter() - started
-
-        versions.add(run.manifest.generator_version)
-        hashes.add(run.config.tuning_hash)
-        metrics = run.metrics
-        links = metrics.link_metrics
-        if links is None:  # pragma: no cover - run_system always scores
-            raise ValueError(
-                f"the run over {directory} produced no link metrics; a scale point "
-                "without them would publish a precision of zero for a corpus that "
-                "was never scored"
+            versions.add(run.manifest.generator_version)
+            hashes.add(run.config.tuning_hash)
+            metrics = run.metrics
+            links = metrics.link_metrics
+            if links is None:  # pragma: no cover - run_system always scores
+                raise ValueError(
+                    f"the run over {directory} produced no link metrics; a scale point "
+                    "without them would publish a precision of zero for a corpus that "
+                    "was never scored"
+                )
+            points.append(
+                ScalePoint(
+                    orders=len(run.ingest.orders),
+                    seed=seed,
+                    records=metrics.record_count,
+                    settlements=len(run.ingest.settlements),
+                    bank_rows=len(run.ingest.bank_txns),
+                    true_positives=links.true_positives,
+                    false_positives=links.false_positives,
+                    false_negatives=links.false_negatives,
+                    precision=links.precision,
+                    recall=links.recall,
+                    match_rate=metrics.match_rate,
+                    exception_recall=metrics.exception_recall,
+                    false_positive_cost_minor=links.false_positive_cost_minor,
+                    wall_clock_ms=int(elapsed * 1000),
+                    generate_ms=generate_ms,
+                    records_per_second=(
+                        metrics.record_count / elapsed if elapsed > 0 else 0.0
+                    ),
+                )
             )
-        points.append(
-            ScalePoint(
-                orders=len(run.ingest.orders),
-                records=metrics.record_count,
-                settlements=len(run.ingest.settlements),
-                bank_rows=len(run.ingest.bank_txns),
-                true_positives=links.true_positives,
-                false_positives=links.false_positives,
-                false_negatives=links.false_negatives,
-                precision=links.precision,
-                recall=links.recall,
-                match_rate=metrics.match_rate,
-                exception_recall=metrics.exception_recall,
-                false_positive_cost_minor=links.false_positive_cost_minor,
-                wall_clock_ms=int(elapsed * 1000),
-                generate_ms=generate_ms,
-                records_per_second=(
-                    metrics.record_count / elapsed if elapsed > 0 else 0.0
-                ),
-            )
-        )
 
     if len(hashes) > 1:
         raise ValueError(
@@ -153,7 +176,7 @@ def run_scale(
     return ScaleArtifact(
         split=SplitName.SCALE.value,
         difficulty=difficulty.value,
-        seed=seed,
+        seed=sorted(seeds)[0],
         generator_version=sorted(versions)[0],
         tuning_hash=sorted(hashes)[0],
         calibrated=bundle is not None,

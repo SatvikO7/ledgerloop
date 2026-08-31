@@ -205,6 +205,15 @@ class ScalePoint(_SavedArtifact):
     """
 
     orders: int
+    seed: int = 42
+    """The corpus this point measured.
+
+    A point is (size, seed), not a size. Phase 2.9 learned why: the curve ran
+    one seed, printed *precision held at every size*, and that sentence was true
+    of seed 42 and false of seed 45, which carried 17 false positives at 5,000
+    orders. A benchmark that cannot see a second seed cannot see that.
+    """
+
     records: int
     settlements: int
     bank_rows: int

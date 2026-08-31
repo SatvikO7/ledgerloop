@@ -123,6 +123,18 @@ class MatchContext:
 
     consumed_settlements: set[str] = field(default_factory=set)
     consumed_credits: set[str] = field(default_factory=set)
+    #: Settlements a tier removed from the pool **without** claiming a credit.
+    #:
+    #: The pool records that a settlement has been ruled on; it does not record
+    #: whether the ruling explained any money. Those are different facts and a
+    #: later tier needs the second one: a settlement that was *refused* still
+    #: has an outstanding claim on whatever credit it was refused over, while a
+    #: settlement that was *resolved* has none -- its money is accounted for.
+    #:
+    #: Without the distinction, T3 could not tell "this credit is spoken for by
+    #: a batch nobody could settle" from "this credit belongs to nothing". A
+    #: false positive at 5,000 orders came from exactly that blindness.
+    refused_settlements: set[str] = field(default_factory=set)
 
     #: Credits the duplicate-posting pass identified as re-postings of an
     #: earlier identical credit. They are held out of the *matchable* pool and
@@ -245,8 +257,14 @@ class MatchContext:
         Called for a resolved pair *and* for a contested one. See the module
         docstring: reaching a conclusion is what removes a record, not reaching
         a match.
+
+        A call carrying no ``credit_ids`` is a **refusal**: the tier reached a
+        conclusion and explained no money. That is recorded separately, because
+        the settlement's claim on its credit outlives the refusal.
         """
         self.consumed_settlements.add(settlement_id)
+        if not credit_ids:
+            self.refused_settlements.add(settlement_id)
         self.consumed_credits.update(credit_ids)
 
     def merchant_of(self, view: SettlementView) -> str | None:
