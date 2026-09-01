@@ -26,6 +26,8 @@ python -m ledgerloop.cli demo          # generate, calibrate, reconcile, open th
 ```
 
 Full instructions in **[DEMO.md](DEMO.md)**. No API key, no database, no Docker, no Make.
+In a hurry? **[PITCH.md](PITCH.md)** is a five-minute walkthrough — what to run, what to
+look at, and the numbers worth saying out loud.
 
 ---
 
@@ -560,10 +562,10 @@ worth knowing before you look:
   fires zero times, and **removing the layer would change no published number**.
   "Confidence-calibrated" describes the architecture, not a demonstrated behaviour — and
   `EVALUATION.md` derives that paragraph from the fitted bundle rather than asserting it.
-- **No live LLM has been run.** There is no provider key in this environment and none was
-  invented. The provider ladder is built and unit-tested against fake rungs (failover,
-  rate-limit retry, `Retry-After`, ladder exhaustion, cache stability), and the *production*
-  LLM path has now been measured **live against Gemini** (`gemini-3.6-flash`, fallback depth
+- **The live LLM run is a single sample, and it is not reproducible.** The provider ladder
+  is built and unit-tested against fake rungs (failover, rate-limit retry, `Retry-After`,
+  ladder exhaustion, cache stability), and the *production*
+  LLM path has been measured **live against Gemini** (`gemini-3.6-flash`, fallback depth
   0) — 9 calls, 13,097 tokens, 1.21 calls per 100 records, 149.8 s of provider time, 11 of
   35 narration repairs accepted, 1 link proposal returned and **0 accepted**, **9 outputs
   refused by the grounding gate**, 20 exception explanations rewritten, ₹0 actual and ₹8.81

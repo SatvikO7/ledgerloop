@@ -351,9 +351,23 @@ Responses are content-hash cached, so a second identical run makes **zero** live
 calls. The cache key is stable across a failover, so a transient rate limit
 cannot turn into a permanent extra cost.
 
-**No key was present when this repository was built, and none was invented.**
-Every published number is deterministic; the ladder is unit-tested against fake
-rungs, and the production path was measured with the documented offline stand-in.
+**The production LLM path has been measured live, against real Gemini**
+(`gemini-3.6-flash`, fallback depth 0) — `EVALUATION.md` reports it under *The
+production LLM path, measured*, and the artefact records `live: true`. Nine calls,
+13,097 tokens, ₹0 actual and ₹8.81 equivalent-paid cost. **Six of fifteen calls
+failed** (three read timeouts, three HTTP 503s) and the ladder absorbed all six.
+Of what came back, 11 of 35 narration repairs were accepted, **9 outputs were
+refused by the grounding gate** for citing records that were not in the evidence
+pack, and the single link proposal was **not** accepted.
+
+**The control is the point.** The same corpus with `--no-llm` produces precision,
+recall, match rate and exception recall identical to six decimal places. The model
+changed no published number — which is what *"the LLM proposes, deterministic code
+decides"* looks like when it is measured instead of asserted.
+
+Every deterministic figure in this repository still reproduces with `--no-llm` and
+no key; the live figures are **one measured run** and will not reproduce, because
+call counts, failures and latency depend on the network.
 
 ---
 
