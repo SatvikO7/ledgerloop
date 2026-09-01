@@ -34,6 +34,7 @@ WHAT IT REFUSES TO DO
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ledgerloop.agent.store import StoredRun
@@ -43,20 +44,26 @@ from ledgerloop.ui.views import Headline, headline
 
 __all__ = [
     "GLOSSARY",
+    "REPORT_NAMES",
     "STAGES",
     "AttentionItem",
     "Bucket",
     "GlossaryEntry",
+    "JourneyStep",
     "MatchStory",
     "Snapshot",
+    "Status",
     "attention_items",
     "buckets",
     "confidence_word",
     "glossary",
+    "journey",
     "match_story",
+    "report_labels",
     "safety_note",
     "snapshot",
     "stage_of",
+    "status_of",
     "transaction_rows",
 ]
 
@@ -181,9 +188,35 @@ class Snapshot:
     referred: int
     """Found and deliberately not committed. Not a miss -- a referral."""
 
+    checked: int | None
+    """Transactions a perfect system could have reconciled from these files.
+
+    The **match-rate denominator**, taken from the run's stored interval, so the
+    three figures below it are one unit and genuinely add up: ``checked`` equals
+    ``resolved + unresolved``. ``records`` is a larger number -- everything read,
+    including rows nothing could ever resolve -- and quoting it beside
+    ``resolved`` would invent a failure rate the run never measured.
+
+    ``None`` on a run recorded before intervals were stored. The screen falls
+    back to ``records`` and says which it is showing rather than guessing.
+    """
+
+    resolved: int | None
+    """How many of ``checked`` ended up reconciled."""
+
+    unresolved: int | None
+    """How many did not, and are left for a person."""
+
     @property
     def is_clean(self) -> bool:
         return self.incorrect == 0
+
+    @property
+    def counts_add_up(self) -> bool:
+        """Whether the same-unit triple is available and consistent."""
+        if self.checked is None or self.resolved is None or self.unresolved is None:
+            return False
+        return self.resolved + self.unresolved == self.checked
 
 
 def snapshot(run: StoredRun) -> Snapshot:
@@ -196,7 +229,17 @@ def snapshot(run: StoredRun) -> Snapshot:
     that has already had its errors quietly removed.
     """
     view = headline(run)
+    interval = run.metrics.get("intervals", {}).get("match_rate_interval") or {}
+    checked = interval.get("trials")
+    resolved = interval.get("successes")
     return Snapshot(
+        checked=int(checked) if checked is not None else None,
+        resolved=int(resolved) if resolved is not None else None,
+        unresolved=(
+            int(checked) - int(resolved)
+            if checked is not None and resolved is not None
+            else None
+        ),
         matched=view.auto_matched,
         needs_attention=view.queue_size,
         not_matched=view.false_negatives,
@@ -275,6 +318,122 @@ def safety_note(run: StoredRun) -> tuple[str, str]:
         f"{view.incorrect_cost}. Every one is listed in the technical report.",
     )
 
+
+
+#: Split name -> what to call that report on screen.
+#:
+#: The run ids the store writes (`t0t4-test-42`, `ui-demo`) encode a ladder, a
+#: split and a seed, which is exactly right for reproducing a figure and exactly
+#: wrong as the first thing a reader sees. The split is the only part of that
+#: identity a non-technical reader has any use for, so it is the part that
+#: survives. The full id stays in the sidebar's details expander.
+REPORT_NAMES: dict[str, str] = {
+    "dev": "Demo report",
+    "test": "Test report",
+    "calibration": "Calibration report",
+    "train": "Training report",
+    "scale": "Large-scale report",
+}
+
+
+def report_labels(runs: Sequence[StoredRun]) -> dict[str, str]:
+    """A friendly name per run id, unique within the list.
+
+    Two runs of the same split would otherwise share a label and the picker
+    would show the same words twice, so repeats are numbered in list order --
+    deterministic, and stable between reloads.
+    """
+    used: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    for run in runs:
+        split = str(run.summary.get("dataset", {}).get("split", ""))
+        base = REPORT_NAMES.get(split, "Reconciliation report")
+        used[base] = used.get(base, 0) + 1
+        labels[run.run_id] = base if used[base] == 1 else f"{base} ({used[base]})"
+    return labels
+
+
+@dataclass(frozen=True)
+class Status:
+    """The one-line verdict the first viewport leads with."""
+
+    icon: str
+    title: str
+    body: str
+    tone: str
+
+
+def status_of(run: StoredRun) -> Status:
+    """Did this reconciliation finish safely, and what does that mean?
+
+    Three states, and the ordering matters: a wrong match outranks a queue,
+    because a queue is work and a wrong match is a mistake already in the books.
+    """
+    view = snapshot(run)
+    if not view.is_clean:
+        return Status(
+            "!",
+            f"{view.incorrect} match(es) were wrong",
+            f"{view.incorrect} transaction(s) were reconciled that should not have "
+            f"been, involving {view.incorrect_cost}. Check these before relying on "
+            "this report.",
+            "bad",
+        )
+    if view.needs_attention:
+        # `unresolved` where the run stored it, so this sentence agrees with the
+        # "Need review" figure beside it. The queue is a different, larger count
+        # -- it also holds records outside the reconcilable set -- and naming
+        # both as "needs review" on one screen is what made 29 and 67 look like
+        # a contradiction.
+        waiting = view.unresolved if view.unresolved is not None else view.needs_attention
+        return Status(
+            "OK",
+            "Reconciliation completed safely",
+            f"Nothing was matched incorrectly. {waiting:,} transaction(s) could "
+            "not be settled from the evidence available and are waiting for a "
+            "person.",
+            "good",
+        )
+    return Status(
+        "OK",
+        "Reconciliation completed safely",
+        "Nothing was matched incorrectly, and nothing needs a person.",
+        "good",
+    )
+
+
+@dataclass(frozen=True)
+class JourneyStep:
+    """One stop on the picture of what LedgerLoop actually does."""
+
+    label: str
+    note: str
+    tone: str
+
+
+def journey(run: StoredRun) -> tuple[list[JourneyStep], list[JourneyStep]]:
+    """Two paths through the same three files: settled, and not settled.
+
+    Drawn side by side because the second one is the product's argument. A
+    reconciliation tool that only showed the happy path would be hiding the
+    behaviour that makes this one trustworthy.
+    """
+    view = snapshot(run)
+    resolved = view.resolved if view.resolved is not None else view.matched
+    settled = [
+        JourneyStep("Payment", "what your system says was taken", "muted"),
+        JourneyStep("Bank transaction", "what actually arrived", "muted"),
+        JourneyStep("Settlement record", "what the processor says it paid", "muted"),
+        JourneyStep("Reconciled", f"{resolved:,} of these", "good"),
+    ]
+    unresolved = view.unresolved if view.unresolved is not None else view.needs_attention
+    stuck = [
+        JourneyStep("Payment", "what your system says was taken", "muted"),
+        JourneyStep("Bank transaction", "no reference, or two possible matches", "muted"),
+        JourneyStep("Not enough evidence", "nothing was guessed", "warn"),
+        JourneyStep("Sent for review", f"{unresolved:,} of these", "warn"),
+    ]
+    return settled, stuck
 
 @dataclass(frozen=True)
 class AttentionItem:

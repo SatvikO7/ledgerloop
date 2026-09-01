@@ -71,14 +71,28 @@ class TestTheScriptRuns:
         assert "LedgerLoop" in markdown
         assert "Automatic payment reconciliation" in markdown
 
-    def test_the_masthead_names_the_run_on_screen(self, workspace, monkeypatch):
-        """The hero is the only place a reader learns which run they are
-        looking at, so it must carry the run id and the corpus."""
+    def test_the_reader_can_tell_which_report_is_on_screen(
+        self, workspace, monkeypatch
+    ):
+        """Not by run id -- that moved to the details expander -- but by the
+        report's name in the picker and the size of what it checked."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        sidebar = " ".join(item.value for item in test.sidebar.markdown)
+        captions = " ".join(item.value for item in test.sidebar.caption)
+        assert "**Current report**" in sidebar
+        assert "transactions checked" in captions
+        assert "Demo report" in [str(o) for o in test.radio[0].options]
+
+    def test_the_masthead_says_whether_a_model_was_involved(
+        self, workspace, monkeypatch
+    ):
+        """The one thing about the run's provenance a non-technical reader
+        genuinely benefits from before reading any number."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
         markdown = " ".join(item.value for item in test.markdown)
-        assert "app-run" in markdown
-        assert "records" in markdown
+        assert "No AI model used" in markdown
 
     def test_the_sections_are_named_for_a_reader_not_a_developer(
         self, workspace, monkeypatch
@@ -97,17 +111,22 @@ class TestTheScriptRuns:
         labels = [tab.label for tab in test.tabs]
         assert labels == [
             "Overview",
-            "Needs attention",
+            "Needs review",
             "Transactions",
             "Why it matched",
-            "Technical report",
-            "Run",
+            "Accuracy & details",
+            "New report",
         ]
 
-    def test_it_lists_the_completed_run(self, workspace, monkeypatch):
+    def test_the_report_picker_names_reports_not_run_ids(self, workspace, monkeypatch):
+        """`app-run`, `t0t4-test-42` and `ui-demo` encode a ladder, a split and a
+        seed. That is what someone reproducing a figure needs and what someone
+        reading one does not; the picker shows what the report *is*."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        assert any("app-run" in str(option) for option in test.radio[0].options)
+        shown = [str(option) for option in test.radio[0].options]
+        assert shown == ["Demo report"]
+        assert not any("app-run" in label for label in shown)
 
     def test_an_empty_store_says_so_rather_than_rendering_blank_screens(
         self, workspace, monkeypatch, tmp_path
@@ -118,8 +137,8 @@ class TestTheScriptRuns:
         test = _app(monkeypatch, tmp_path / "empty", corpus.parent).run()
         assert not test.exception
         messages = [item.value for item in test.info]
-        assert any("No runs yet" in message for message in messages)
-        assert any("No run yet" in message for message in messages)
+        assert any("No reports yet" in message for message in messages)
+        assert any("No report yet" in message for message in messages)
 
 
 class TestTheResultsScreen:
@@ -424,10 +443,11 @@ class TestItReadsWithoutJargon:
         test = _app(monkeypatch, runs, corpus.parent).run()
         markdown = " ".join(item.value for item in test.markdown)
         for label in (
-            "Matched",
-            "Amount reconciled",
-            "Needs attention",
+            "Transactions checked",
+            "Successfully matched",
+            "Need review",
             "Incorrect matches",
+            "reconciled",
         ):
             assert label in markdown
 
@@ -473,16 +493,141 @@ class TestItReadsWithoutJargon:
             assert term in list(table["Term"])
 
 
+
+class TestTheSidebarIsForAReader:
+    """The sidebar is chrome: it is on screen on every tab, so anything
+    technical there is technical *everywhere*. It used to open with
+    `ui-demo`, `t0t4-test-42`, `t0t4-calibration-42` and a tuning hash."""
+
+    #: Fragments of the run-id scheme. None may appear in the sidebar's own
+    #: markdown; all remain available inside the details expander.
+    RUN_ID_FRAGMENTS = ("t0t4", "app-run", "ui-demo", "seed 42")
+
+    def test_no_internal_run_identifier_is_shown_by_default(
+        self, workspace, monkeypatch
+    ):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        sidebar = " ".join(item.value for item in test.sidebar.markdown)
+        for fragment in self.RUN_ID_FRAGMENTS:
+            assert fragment not in sidebar, f"{fragment!r} is still in the sidebar"
+
+    def test_no_internal_identifier_reaches_the_masthead_either(
+        self, workspace, monkeypatch
+    ):
+        """The masthead is on screen on every tab too. It used to carry
+        `run app-run` and `dev - standard - seed 42` as chips."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        hero = markdown[markdown.find("ll-hero") : markdown.find("ll-hero") + 900]
+        for fragment in ("app-run", "seed", "difficulty", "standard"):
+            assert fragment not in hero, f"{fragment!r} is still in the masthead"
+
+    def test_it_names_the_section_reports_not_runs(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        sidebar = " ".join(item.value for item in test.sidebar.markdown)
+        assert "**Reports**" in sidebar
+        assert "**Current report**" in sidebar
+
+    def test_it_counts_transactions_rather_than_records(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        captions = " ".join(item.value for item in test.sidebar.caption)
+        assert "transactions checked" in captions
+
+    def test_it_says_whether_the_reconciliation_finished_safely(
+        self, workspace, monkeypatch
+    ):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        assert any("Reconciliation complete" in item.value for item in test.success)
+
+    def test_the_identifiers_are_kept_one_click_away(self, workspace, monkeypatch):
+        """Moved, not deleted. A judge reproducing a figure still needs the run
+        id, the seed and the tuning hash."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        captions = " ".join(item.value for item in test.sidebar.caption)
+        assert "app-run" in captions
+        assert "Tuning hash" in captions
+        assert "seed" in captions
+        assert any(
+            "Report details" in str(getattr(item, "label", ""))
+            for item in test.sidebar.expander
+        )
+
+
+class TestTheFirstViewport:
+    """What a judge sees in the first ten seconds, tested as content."""
+
+    def test_it_leads_with_a_verdict(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        assert "Reconciliation completed safely" in overview
+
+    def test_the_four_plain_kpis_are_present(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        for label in (
+            "Transactions checked",
+            "Successfully matched",
+            "Need review",
+            "Incorrect matches",
+        ):
+            assert label in overview
+
+    def test_it_says_what_to_do_next(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        pointers = [item.value for item in test.info] + [
+            item.value for item in test.success
+        ]
+        assert any("Next:" in text or "Nothing is waiting" in text for text in pointers)
+
+    def test_the_process_is_drawn_in_plain_english(self, workspace, monkeypatch):
+        """Payment -> bank transaction -> settlement -> reconciled, and the
+        second path where it does not work out."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        for step in (
+            "Payment",
+            "Bank transaction",
+            "Settlement record",
+            "Reconciled",
+            "Not enough evidence",
+            "Sent for review",
+        ):
+            assert step in overview
+
+    def test_it_shows_both_paths_not_only_the_happy_one(
+        self, workspace, monkeypatch
+    ):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        assert "When the evidence agrees" in overview
+        assert "When it does not" in overview
+
 class TestSafetyIsTheHeadline:
     """Precision-first is the project's strongest property, and the redesign
     had to make it legible without overstating it."""
 
     def test_the_safety_claim_is_stated_in_plain_words(self, workspace, monkeypatch):
+        """Demoted from a second banner to a caption, because the verdict card
+        above it already delivers the headline -- but the sentence that explains
+        *why* the zero is a zero must survive somewhere on the first screen."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        markdown = " ".join(item.value for item in test.markdown)
-        assert "incorrect matches" in markdown
-        assert "instead of guessing" in markdown
+        text = " ".join(
+            item.value for item in list(test.markdown) + list(test.caption)
+        )
+        assert "incorrect matches" in text
+        assert "instead of guessing" in text
 
     def test_the_queue_leads_with_nothing_was_guessed(self, workspace, monkeypatch):
         """The reassurance a controller needs before reading a list of
@@ -505,14 +650,40 @@ class TestSafetyIsTheHeadline:
         assert "99" not in overview
 
     def test_the_three_destinations_stay_three_numbers(self, workspace, monkeypatch):
-        """Matched, needs attention and not matched are never added together.
+        """Matched, needs review and not matched are never added together.
         Folding a refusal into 'matched' is the single most misleading thing a
-        reconciliation dashboard can do."""
+        reconciliation dashboard can do.
+
+        On the Overview these are the KPI row, counted in records. The
+        decision-unit breakdown is on **Accuracy & details**: both are true and
+        they are *different numbers*, so sharing a screen would read as a
+        contradiction rather than as two views of one run.
+        """
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
         overview = " ".join(item.value for item in test.tabs[0].markdown)
-        for label in ("Matched", "Needs attention", "Not matched"):
+        for label in ("Successfully matched", "Need review", "Incorrect matches"):
             assert label in overview
+
+        report = " ".join(item.value for item in test.tabs[4].markdown)
+        for label in ("Matched", "Needs attention", "Not matched"):
+            assert label in report
+
+    def test_the_two_breakdowns_never_share_a_screen(self, workspace, monkeypatch):
+        """The Overview counts records; the report counts decisions. Showing
+        both together produced 316 beside 283 with no explanation."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(
+            item.value
+            for item in list(test.tabs[0].markdown) + list(test.tabs[0].subheader)
+        )
+        assert "Where everything went" not in overview
+        report = " ".join(
+            item.value
+            for item in list(test.tabs[4].markdown) + list(test.tabs[4].subheader)
+        )
+        assert "Where everything went, by decision" in report
 
 
 class TestTheQueueIsActionable:

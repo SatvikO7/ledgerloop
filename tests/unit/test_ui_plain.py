@@ -273,3 +273,127 @@ class TestTheGlossary:
         terms = {entry.term for entry in plain.glossary(headline(stored))}
         for expected in ("Precision", "Recall", "False positives", "Wilson interval"):
             assert expected in terms
+
+
+class TestTheReportLabels:
+    def test_a_split_becomes_a_human_name(self, stored):
+        labels = plain.report_labels([stored])
+        assert labels[stored.run_id] == "Demo report"
+
+    def test_no_label_leaks_a_run_id(self, stored):
+        for label in plain.report_labels([stored]).values():
+            assert stored.run_id not in label
+
+    def test_repeats_are_numbered_so_the_picker_never_shows_one_name_twice(
+        self, stored, tmp_path
+    ):
+        """Two runs of the same split would otherwise share a label, and the
+        picker would show the same words twice."""
+        second = tmp_path / "runs" / "another-demo"
+        second.mkdir(parents=True)
+        for source in stored.directory.iterdir():
+            shutil.copy2(source, second / source.name)
+        # The run id lives in run.json, not in the directory name, so a plain
+        # copy would collide with the original rather than sit beside it.
+        summary = json.loads((second / "run.json").read_text(encoding="utf-8"))
+        summary["run_id"] = "another-demo"
+        (second / "run.json").write_text(json.dumps(summary), encoding="utf-8")
+        other = list_runs(second.parent)[0]
+        assert other.run_id != stored.run_id
+
+        labels = plain.report_labels([stored, other])
+        assert len(labels) == 2
+        assert sorted(labels.values()) == ["Demo report", "Demo report (2)"]
+
+    def test_an_unknown_split_still_gets_a_readable_name(self, stored):
+        """A split this table has never seen must not fall back to the run id."""
+        assert "" not in plain.REPORT_NAMES
+        assert plain.REPORT_NAMES["test"] == "Test report"
+
+
+class TestTheStatusVerdict:
+    def test_a_clean_run_reads_as_completed_safely(self, stored):
+        status = plain.status_of(stored)
+        assert status.title == "Reconciliation completed safely"
+        assert status.tone == "good"
+
+    def test_a_wrong_match_outranks_a_queue(self, stored, tmp_path):
+        """A queue is work; a wrong match is a mistake already in the books.
+        The verdict must lead with the second one."""
+        copied = tmp_path / "runs" / stored.directory.name
+        copied.mkdir(parents=True)
+        for source in stored.directory.iterdir():
+            shutil.copy2(source, copied / source.name)
+        poisoned = json.loads((copied / "run.json").read_text(encoding="utf-8"))
+        poisoned["metrics"]["false_positives"] = 2
+        (copied / "run.json").write_text(json.dumps(poisoned), encoding="utf-8")
+
+        status = plain.status_of(list_runs(copied.parent)[0])
+        assert status.tone == "bad"
+        assert "wrong" in status.title
+
+
+class TestTheSameUnitTriple:
+    def test_the_counts_add_up_when_the_run_stored_them(self, stored):
+        """checked = matched + needs review, or the screen does not show them
+        as a breakdown at all."""
+        snap = plain.snapshot(stored)
+        if snap.counts_add_up:
+            assert snap.resolved is not None and snap.unresolved is not None
+            assert snap.resolved + snap.unresolved == snap.checked
+        else:
+            assert snap.checked is None
+
+    def test_they_come_from_the_run_s_own_match_rate_denominator(self, stored):
+        interval = stored.metrics.get("intervals", {}).get("match_rate_interval")
+        snap = plain.snapshot(stored)
+        if interval:
+            assert snap.checked == interval["trials"]
+            assert snap.resolved == interval["successes"]
+
+    def test_records_is_never_confused_with_checked(self, stored):
+        """`records` counts everything read, including rows nothing could ever
+        resolve. Quoting it beside `resolved` would invent a failure rate."""
+        snap = plain.snapshot(stored)
+        if snap.checked is not None:
+            assert snap.checked <= snap.records
+
+
+class TestTheScreenNeverContradictsItself:
+    def test_the_verdict_quotes_the_same_figure_as_the_need_review_card(self, stored):
+        """29 in the card and 67 in the sentence beside it read as a
+        contradiction, even though both are true of different units."""
+        snap = plain.snapshot(stored)
+        status = plain.status_of(stored)
+        if snap.unresolved is not None and snap.unresolved:
+            assert f"{snap.unresolved:,}" in status.body
+        elif snap.needs_attention:
+            assert f"{snap.needs_attention:,}" in status.body
+
+    def test_the_verdict_counts_transactions_not_queue_items(self, stored):
+        snap = plain.snapshot(stored)
+        if snap.unresolved is not None:
+            assert "transaction(s)" in plain.status_of(stored).body
+
+
+class TestTheJourney:
+    def test_both_paths_are_drawn(self, stored):
+        settled, stuck = plain.journey(stored)
+        assert [step.label for step in settled] == [
+            "Payment",
+            "Bank transaction",
+            "Settlement record",
+            "Reconciled",
+        ]
+        assert stuck[-1].label == "Sent for review"
+
+    def test_the_unsettled_path_says_nothing_was_guessed(self, stored):
+        _, stuck = plain.journey(stored)
+        assert any("guessed" in step.note for step in stuck)
+
+    def test_every_step_is_plain_english(self, stored):
+        settled, stuck = plain.journey(stored)
+        for step in settled + stuck:
+            for word in ("tier", "T0", "lexical", "residual", "calibrat"):
+                assert word not in step.label
+                assert word not in step.note
