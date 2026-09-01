@@ -57,7 +57,14 @@ class TestTheCanonicalCommands:
             "ledgerloop.cli",
             "demo",
             "--no-ui",
+            "--no-llm",
         ]
+
+    def test_the_launcher_is_deterministic_whatever_is_configured(self, run):
+        """`--no-llm` is not tidiness. Until `.env` was loaded this file was
+        offline by accident; a saved credential now reaches the process, and the
+        promise in the docstring has to be enforced rather than inherited."""
+        assert "--no-llm" in run.demo_command()
 
     def test_the_demo_runs_headless_so_a_failure_can_be_caught(self, run):
         """``--no-ui`` is what separates 'the run failed' from 'the screen is blank'.

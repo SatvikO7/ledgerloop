@@ -60,6 +60,19 @@ def _app(monkeypatch, runs, data_root):
     return AppTest.from_file(APP, default_timeout=120)
 
 
+def _tab(test, label: str):
+    """The tab with this label.
+
+    By name rather than by index: the positional form broke the moment a tab was
+    added at the front, and a test that pins a position is asserting the layout
+    rather than the guarantee it was written for.
+    """
+    for tab in test.tabs:
+        if tab.label == label:
+            return tab
+    raise AssertionError(f"no tab labelled {label!r}; got {[t.label for t in test.tabs]}")
+
+
 class TestTheScriptRuns:
     def test_it_renders_without_raising(self, workspace, monkeypatch):
         """A page that renders a traceback still returns HTTP 200. Only running
@@ -110,12 +123,13 @@ class TestTheScriptRuns:
         test = _app(monkeypatch, runs, corpus.parent).run()
         labels = [tab.label for tab in test.tabs]
         assert labels == [
+            "Your files",
             "Overview",
             "Needs review",
             "Transactions",
             "Why it matched",
             "Accuracy & details",
-            "New report",
+            "Sample data",
         ]
 
     def test_the_report_picker_names_reports_not_run_ids(self, workspace, monkeypatch):
@@ -138,7 +152,7 @@ class TestTheScriptRuns:
         assert not test.exception
         messages = [item.value for item in test.info]
         assert any("No reports yet" in message for message in messages)
-        assert any("No report yet" in message for message in messages)
+        assert any("Upload your files" in message for message in messages)
 
 
 class TestTheResultsScreen:
@@ -456,7 +470,7 @@ class TestItReadsWithoutJargon:
         the technical screens cannot accidentally satisfy it."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         for word in self.JARGON:
             assert word not in overview, f"{word!r} reached the first screen"
 
@@ -468,7 +482,7 @@ class TestItReadsWithoutJargon:
         for a tidier screen."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        report = " ".join(item.value for item in test.tabs[4].markdown)
+        report = " ".join(item.value for item in _tab(test, "Accuracy & details").markdown)
         for word in ("Precision", "Recall", "Match rate", "95% CI"):
             assert word in report
 
@@ -565,13 +579,13 @@ class TestTheFirstViewport:
     def test_it_leads_with_a_verdict(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         assert "Reconciliation completed safely" in overview
 
     def test_the_four_plain_kpis_are_present(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         for label in (
             "Transactions checked",
             "Successfully matched",
@@ -593,7 +607,7 @@ class TestTheFirstViewport:
         second path where it does not work out."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         for step in (
             "Payment",
             "Bank transaction",
@@ -609,7 +623,7 @@ class TestTheFirstViewport:
     ):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         assert "When the evidence agrees" in overview
         assert "When it does not" in overview
 
@@ -634,7 +648,7 @@ class TestSafetyIsTheHeadline:
         problems: this is a refusal, not a failure."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        attention = " ".join(item.value for item in _tab(test, "Needs review").markdown)
         assert "Nothing was guessed" in attention
 
     def test_the_overview_never_calls_a_perfect_score_a_pass(
@@ -645,7 +659,7 @@ class TestSafetyIsTheHeadline:
         report with its interval where it can be read properly."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         assert "target met" not in overview
         assert "99" not in overview
 
@@ -661,11 +675,11 @@ class TestSafetyIsTheHeadline:
         """
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        overview = " ".join(item.value for item in _tab(test, "Overview").markdown)
         for label in ("Successfully matched", "Need review", "Incorrect matches"):
             assert label in overview
 
-        report = " ".join(item.value for item in test.tabs[4].markdown)
+        report = " ".join(item.value for item in _tab(test, "Accuracy & details").markdown)
         for label in ("Matched", "Needs attention", "Not matched"):
             assert label in report
 
@@ -674,14 +688,14 @@ class TestSafetyIsTheHeadline:
         both together produced 316 beside 283 with no explanation."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
+        home = _tab(test, "Overview")
         overview = " ".join(
-            item.value
-            for item in list(test.tabs[0].markdown) + list(test.tabs[0].subheader)
+            item.value for item in list(home.markdown) + list(home.subheader)
         )
         assert "Where everything went" not in overview
+        details = _tab(test, "Accuracy & details")
         report = " ".join(
-            item.value
-            for item in list(test.tabs[4].markdown) + list(test.tabs[4].subheader)
+            item.value for item in list(details.markdown) + list(details.subheader)
         )
         assert "Where everything went, by decision" in report
 
@@ -692,14 +706,14 @@ class TestTheQueueIsActionable:
     ):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        attention = " ".join(item.value for item in _tab(test, "Needs review").markdown)
         assert "What we found." in attention
         assert "What to do." in attention
 
     def test_it_leads_with_the_money(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        attention = " ".join(item.value for item in _tab(test, "Needs review").markdown)
         assert "Money involved" in attention
         assert "₹" in attention
 
@@ -708,7 +722,7 @@ class TestWhyItMatchedExplainsItself:
     def test_it_gives_reasons_rather_than_a_tier_name(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        why = " ".join(item.value for item in test.tabs[3].markdown)
+        why = " ".join(item.value for item in _tab(test, "Why it matched").markdown)
         assert "How it was matched." in why
         assert "Confidence." in why
         assert "T0_EXACT" not in why
@@ -721,7 +735,7 @@ class TestWhyItMatchedExplainsItself:
         claim. The exact figure stays in the expander."""
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
-        why = " ".join(item.value for item in test.tabs[3].markdown)
+        why = " ".join(item.value for item in _tab(test, "Why it matched").markdown)
         assert any(
             phrase in why
             for phrase in ("Very strong evidence", "Strong evidence", "Not confirmed")

@@ -72,16 +72,22 @@ from __future__ import annotations
 
 import html
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, TypedDict, TypeVar, cast
 
 import streamlit as st
 
 from ledgerloop.agent.graph import langgraph_available
 from ledgerloop.agent.store import RUNS_ROOT, StoredRun, list_runs
-from ledgerloop.config import GeneratorConfig
+from ledgerloop.config import GeneratorConfig, LLMConfig
+from ledgerloop.envfile import load_env_file
+from ledgerloop.eval.harness import ReconcileResult, reconcile_only
 from ledgerloop.generator import generate_to_disk
+from ledgerloop.ingest.problems import IngestError
+from ledgerloop.llm.client import LLMClient
+from ledgerloop.llm.providers import build_ladder
 from ledgerloop.models.enums import DecisionOutcome, Difficulty, SplitName
 from ledgerloop.models.metrics import Verdict
 from ledgerloop.money import format_minor
@@ -100,6 +106,14 @@ from ledgerloop.ui.plain import (
     status_of,
     transaction_rows,
     transaction_search,
+)
+from ledgerloop.ui.uploads import (
+    SourceKind,
+    UploadProblem,
+    assess,
+    detect,
+    row_count,
+    validate,
 )
 from ledgerloop.ui.views import (
     OUTCOME_HELP,
@@ -396,6 +410,14 @@ _STYLE = """
     border: 1px solid rgba(5, 150, 105, 0.35); background: var(--ll-good-soft);
   }
   .ll-status.ll-t-bad { border-color: rgba(220, 38, 38, 0.4); background: var(--ll-bad-soft); }
+  /* Amber is a real state here: "can be read, but not reconciled" is neither a
+     success nor a failure, and rendering it in success green -- which is what
+     happened before this rule existed -- told the reader the opposite of the
+     sentence they were reading. */
+  .ll-status.ll-t-warn {
+    border-color: rgba(217, 119, 6, 0.42); background: var(--ll-warn-soft);
+  }
+  .ll-status.ll-t-warn .ll-status-title { color: var(--ll-warn); }
   .ll-status .ll-status-title {
     font-size: 1.6rem; font-weight: 800; letter-spacing: -0.025em; color: var(--ll-good);
   }
@@ -439,6 +461,21 @@ _STYLE = """
   .ll-jarrow {
     text-align: center; color: var(--ll-muted); font-size: 1rem; line-height: 1.2;
     padding: 0.15rem 0;
+  }
+
+  /* An optional source. Present or not; never a requirement. */
+  .ll-drop {
+    border: 1px dashed var(--ll-line); border-radius: 14px;
+    padding: 0.85rem 1rem; background: var(--ll-surface); margin-bottom: 0.5rem;
+  }
+  .ll-drop.ll-have { border-style: solid; border-color: rgba(5, 150, 105, 0.45); }
+  .ll-drop .ll-drop-title { font-size: 1rem; font-weight: 700; color: var(--ll-ink); }
+  .ll-drop .ll-drop-note {
+    font-size: 0.82rem; color: var(--ll-muted); margin-top: 0.2rem; line-height: 1.4;
+  }
+  .ll-drop .ll-drop-type {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ll-muted); font-weight: 700; margin-top: 0.45rem;
   }
 
   .ll-lede {
@@ -1579,6 +1616,325 @@ def screen_report(run: StoredRun) -> None:
     screen_evidence(run)
 
 
+
+def _model_available() -> bool:
+    """Whether a model could be reached, without reaching for one.
+
+    `.env` is loaded here as well as in the CLI, because ``streamlit run``
+    starts the script directly and never passes through ``ledgerloop.cli``. An
+    already-exported variable still wins; see :mod:`ledgerloop.envfile`.
+    """
+    load_env_file()
+    return build_ladder(LLMConfig(enabled=True)) is not None
+
+
+def _ui_client(*, wanted: bool) -> LLMClient:
+    """The model client this interface should use, if any.
+
+    ``wanted`` is the person's explicit choice, and it defaults to **off**.
+    Three reasons, in order:
+
+    * the deterministic path is the one every published number came from, and it
+      should stay what happens when nobody asked for anything else;
+    * a live run took roughly two and a half minutes of provider time in Phase
+      2.8, against under a second deterministically, and a reviewer clicking a
+      button deserves to know which they are getting;
+    * a key in `.env` is a *capability*, not an instruction. Spending someone's
+      quota because they once saved a credential is not a decision this
+      interface gets to make for them.
+
+    Returns a **disabled** client when nothing is reachable or nothing was
+    asked for. Nothing here reports that a model ran: that is read from the cost
+    ledger afterwards, because a key existing is not a call being made.
+    """
+    if not wanted or not _model_available():
+        return LLMClient(config=LLMConfig(enabled=False), provider=None)
+    # Its own cache directory, not the default.
+    #
+    # `LLMConfig.cache_dir` defaults to `tests/fixtures/llm_cache`, which is
+    # committed and is supposed to stay empty until a deliberate live run fills
+    # it -- Step 10 leaked five stand-in responses in there once and they had to
+    # be removed. A dashboard writing real model answers into the test fixtures
+    # would do it again, quietly, every time somebody ticked the box. B2 solved
+    # this the same way with `reports/llm_cache_b2`.
+    config = LLMConfig(enabled=True, cache_dir=Path("reports/llm_cache_ui"))
+    ladder = build_ladder(config)
+    if ladder is None:  # pragma: no cover - guarded by _model_available
+        return LLMClient(config=LLMConfig(enabled=False), provider=None)
+    return LLMClient(config=config, provider=ladder)
+
+
+class _Held(TypedDict):
+    """One accepted upload, as the screen needs to describe it."""
+
+    filename: str
+    rows: int
+    bytes: int
+
+
+def _session_upload_dir() -> Path:
+    """A private scratch directory for this browser session.
+
+    Created under the system temp root, never inside the repository: an upload
+    that landed in ``data/`` could overwrite a committed fixture, and a demo
+    would then display someone's real statement. The path is kept in session
+    state so a rerun reuses it rather than scattering directories.
+    """
+    key = "upload_dir"
+    existing = st.session_state.get(key)
+    if existing and Path(existing).is_dir():
+        return Path(existing)
+    created = Path(tempfile.mkdtemp(prefix="ledgerloop-upload-"))
+    st.session_state[key] = str(created)
+    return created
+
+
+def _uploaded() -> dict[SourceKind, _Held]:
+    """What has been accepted so far, by source."""
+    store = st.session_state.setdefault("uploads", {})
+    return cast("dict[SourceKind, _Held]", store)
+
+
+def _accept(kind: SourceKind, name: str, payload: bytes) -> UploadProblem | None:
+    """Validate and store one file. Returns the problem, or ``None`` on success.
+
+    The bytes are written to the session directory under the name the ingester
+    expects, so nothing downstream needs to know an upload happened.
+    """
+    problem = validate(kind, name, payload)
+    if problem is not None:
+        return problem
+    target = _session_upload_dir() / kind.value
+    target.write_bytes(payload)
+    _uploaded()[kind] = {
+        "filename": name,
+        "rows": row_count(kind, payload),
+        "bytes": len(payload),
+    }
+    return None
+
+
+def _upload_card(kind: SourceKind) -> None:
+    """One optional source: drop a file, or do not."""
+    held = _uploaded().get(kind)
+    st.markdown(
+        f'<div class="ll-drop{" ll-have" if held else ""}">'
+        f'<div class="ll-drop-title">{_esc(kind.label)}</div>'
+        f'<div class="ll-drop-note">{_esc(kind.blurb)}</div>'
+        f'<div class="ll-drop-type">{_esc(kind.file_type)} &middot; optional</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    chosen = st.file_uploader(
+        kind.label,
+        type=["json"] if kind is SourceKind.PROCESSOR else ["csv"],
+        key=f"upload_{kind.name}",
+        label_visibility="collapsed",
+    )
+    if chosen is not None:
+        payload = chosen.getvalue()
+        detected = detect(chosen.name, payload)
+        if detected is not None and detected is not kind:
+            st.warning(
+                f"This looks like a **{detected.label.lower()}**, not a "
+                f"{kind.label.lower()}. Upload it in the "
+                f"**{detected.label}** box instead."
+            )
+        else:
+            problem = _accept(kind, chosen.name, payload)
+            if problem is not None:
+                st.error(f"**{problem.reason}.** {problem.detail}")
+
+    held = _uploaded().get(kind)
+    if held:
+        unit = "payout(s)" if kind is SourceKind.PROCESSOR else "row(s)"
+        st.success(f"{held['filename']} - {held['rows']:,} {unit}")
+        if st.button("Remove", key=f"remove_{kind.name}"):
+            _uploaded().pop(kind, None)
+            path = _session_upload_dir() / kind.value
+            if path.is_file():
+                path.unlink()
+            st.rerun()
+
+
+def screen_upload() -> None:
+    """Bring your own files. The first thing a new visitor sees."""
+    st.subheader("Upload your files")
+    st.markdown(
+        '<p class="ll-lede">Add whichever records you have. '
+        "<strong>None of them is required</strong> on its own, and LedgerLoop "
+        "will tell you what it can do with the combination you give it.</p>",
+        unsafe_allow_html=True,
+    )
+
+    columns = st.columns(3)
+    for column, kind in zip(columns, SourceKind, strict=True):
+        with column:
+            _upload_card(kind)
+
+    supplied = set(_uploaded())
+    verdict = assess(supplied)
+    tone = "good" if verdict.can_reconcile else "warn"
+    st.markdown(
+        f'<div class="ll-status {_TONE_SUFFIX[tone]}" style="margin-top:1rem">'
+        f'<div class="ll-status-title">{_esc(verdict.headline)}</div>'
+        f'<div class="ll-status-body">{_esc(verdict.detail)}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if verdict.missing_hint:
+        st.caption(verdict.missing_hint)
+
+    if not supplied:
+        st.caption(
+            "No files yet. The reports already on this machine are in the "
+            "sidebar, if you would rather look at one of those."
+        )
+        return
+
+    if _model_available():
+        st.checkbox(
+            "Also ask the AI assistant about anything the rules could not settle",
+            key="use_llm",
+            help=(
+                "Off by default. The rules alone are deterministic and take under "
+                "a second; a model adds a network round trip and can take minutes. "
+                "Whatever it suggests is still re-checked against your files "
+                "before anything is accepted."
+            ),
+        )
+    else:
+        st.caption(
+            "No AI model is configured on this machine, so this runs on the "
+            "deterministic rules alone. That is the normal case and needs no "
+            "setup."
+        )
+
+    disabled = not verdict.can_reconcile
+    if st.button(
+        "Start reconciliation",
+        type="primary",
+        disabled=disabled,
+        key="start_upload_run",
+    ):
+        _reconcile_uploads()
+
+    result = st.session_state.get("upload_result")
+    if result is not None:
+        _upload_results(cast("ReconcileResult", result))
+
+
+def _reconcile_uploads() -> None:
+    """Run the ladder over the uploaded files and keep the result."""
+    directory = _session_upload_dir()
+    client = _ui_client(wanted=bool(st.session_state.get("use_llm", False)))
+    with st.spinner("Reading your files and matching what can be proved..."):
+        try:
+            st.session_state["upload_result"] = reconcile_only(
+                directory, client=client
+            )
+        except IngestError as error:
+            st.session_state["upload_result"] = None
+            st.error(f"**Your files could not be read.** {error}")
+
+
+def _upload_results(result: ReconcileResult) -> None:
+    """What happened, in the same plain words the Overview uses."""
+    st.divider()
+    st.subheader("Result")
+    ingest = result.ingest
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            "",
+            "Transactions read",
+            f"{ingest.record_count:,}",
+            "records across the files you supplied",
+            "brand",
+        )
+        + _big_card(
+            _TICK,
+            "Confidently matched",
+            f"{result.committed_links:,}",
+            "payments linked to a bank credit",
+            "good",
+        )
+        + _big_card(
+            _WARN,
+            "Need your attention",
+            f"{result.queue_size:,}",
+            "LedgerLoop would not guess at these",
+            "warn",
+        )
+        + _big_card(
+            _RUPEE,
+            "Value matched",
+            format_minor(result.committed_minor),
+            "on the links it committed",
+            "brand",
+            money=True,
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if result.llm_used:
+        st.info(
+            f"The AI assistant was called {result.llm_calls} time(s). Everything "
+            "it suggested was re-checked against your files before being "
+            "accepted, and anything that did not add up was sent for review."
+        )
+    else:
+        st.caption(
+            "Deterministic: no AI model was called for this result."
+        )
+    st.caption(
+        "**No accuracy figures are shown for your own files, on purpose.** "
+        "Precision and recall are measured against a hand-checked answer key, "
+        "and your files do not come with one. Everything above is a statement "
+        "about what LedgerLoop *did*, never a claim about whether it was right."
+    )
+
+    if result.exceptions:
+        st.markdown("**What needs a person**")
+        for item in sorted(
+            result.exceptions, key=lambda x: -x.impact_minor
+        )[:10]:
+            st.markdown(
+                f'<div class="ll-item">'
+                f'<div class="ll-item-amt">{_esc(format_minor(item.impact_minor))}</div>'
+                f'<div class="ll-item-body"><strong>What we found.</strong> '
+                f"{_esc(item.root_cause)}</div>"
+                f'<div class="ll-item-act"><strong>What to do.</strong> '
+                f"{_esc(item.suggested_action)}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        if len(result.exceptions) > 10:
+            st.caption(
+                f"Showing the 10 largest of {len(result.exceptions)}."
+            )
+
+    with st.expander("Advanced reconciliation details"):
+        st.write(
+            {
+                "Orders read": len(ingest.orders),
+                "Payments read": len(ingest.payments),
+                "Payouts read": len(ingest.settlements),
+                "Bank rows read": len(ingest.bank_txns),
+                "Rows quarantined by ingest": len(ingest.problems),
+                "Candidates proposed": len(result.matched.candidates),
+                "Committed links": result.committed_links,
+                "Exception queue": result.queue_size,
+                "AI assistant calls": result.llm_calls,
+            }
+        )
+        st.caption(
+            "No precision, recall or match rate: each is scored against ground "
+            "truth, which uploaded files do not carry. The bundled reports in "
+            "the sidebar do carry it, and **Accuracy & details** reports all of "
+            "it for them."
+        )
+
 # --------------------------------------------------------------------------
 # The run launcher
 # --------------------------------------------------------------------------
@@ -1748,14 +2104,20 @@ def main() -> None:
     # everything, prove one of them, and only then the measurement.
     tabs = st.tabs(
         [
+            "Your files",
             "Overview",
             "Needs review",
             "Transactions",
             "Why it matched",
             "Accuracy & details",
-            "New report",
+            "Sample data",
         ]
     )
+    # Upload first. A visitor arrives with their own records, not with a
+    # curiosity about a bundled corpus, so the thing they came to do is the
+    # first thing on the page.
+    with tabs[0]:
+        screen_upload()
     screens = (
         screen_home,
         screen_attention,
@@ -1763,13 +2125,16 @@ def main() -> None:
         screen_why,
         screen_report,
     )
-    for tab, screen in zip(tabs[:5], screens, strict=True):
+    for tab, screen in zip(tabs[1:6], screens, strict=True):
         with tab:
             if selected is None:
-                st.info("No report yet. Create one on the **New report** tab.")
+                st.info(
+                    "These screens describe a finished report. Upload your files "
+                    "on **Your files**, or create a sample one on **Sample data**."
+                )
             else:
                 screen(selected)
-    with tabs[5]:
+    with tabs[6]:
         screen_run()
 
 

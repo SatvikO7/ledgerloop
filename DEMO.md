@@ -54,7 +54,9 @@ Everything below assumes the venv's interpreter. On Windows that is
 python run.py
 ```
 
-`run.py` sits at the repository root and is the shortest path for a reviewer. It is a
+`run.py` sits at the repository root and is the shortest path for a reviewer.
+It opens on **Your files**, where you can drop in your own records -- see
+[Bringing your own files](#bringing-your-own-files) below. It is a
 **launcher, not a second pipeline** — it holds no reconciliation logic, no metric and no
 money arithmetic. It:
 
@@ -185,6 +187,45 @@ a Wilson interval. The fifth is where all of that lives.
      arithmetic verification → decision.
 6. **Run** — reconcile any other corpus on disk, including the 300-order `test`
    split.
+
+---
+
+## Bringing your own files
+
+The dashboard opens on **Your files**. Three optional cards; **none of them is
+required on its own**, and LedgerLoop says what the combination you give it can
+actually do rather than demanding a full set.
+
+| card | format | what it is |
+|---|---|---|
+| Bank statement | CSV | the credits and debits your bank actually posted |
+| Payment processor report | JSON | what your provider says it paid out, and the payments inside each payout |
+| Order ledger | CSV | your own record of the orders you took |
+
+**What each combination can do**, measured by running the real ladder over the
+committed fixture with sources removed -- not asserted:
+
+| you upload | payment-to-bank links | what the screen says |
+|---|---|---|
+| any one file alone | 0 | *can be read, but not reconciled* -- there is no second record to check it against |
+| ledger + processor | 0 | orders link to payments, but nothing confirms the money arrived |
+| ledger + bank | 0 | nothing joins them; the payout that carried the money lives in the processor report |
+| **processor + bank** | **29** | **ready to reconcile** -- the minimum for the check this tool performs |
+| **all three** | **39** | ready, and the ledger recovers payouts whose bank reference is missing |
+
+Files are identified by **content**, not by upload order: a bank export dropped
+in the wrong box is recognised and redirected. A file that matches no known
+schema is not guessed at -- you are told, and nothing is loaded.
+
+Uploads are written to a per-session temporary directory, never beside the
+committed fixtures, and are parsed with `csv` and `json` and nothing else.
+
+**No accuracy figures are shown for your own files.** Precision and recall are
+scored against a hand-checked answer key, and your files do not come with one.
+The result reports what LedgerLoop *did* -- what it matched, what it was worth,
+and what it refused -- never a claim about whether it was right. The bundled
+sample reports do carry an answer key, and **Accuracy & details** reports all of
+it for them.
 
 ---
 
@@ -392,6 +433,25 @@ What changes, and what cannot:
 Responses are content-hash cached, so a second identical run makes **zero** live
 calls. The cache key is stable across a failover, so a transient rate limit
 cannot turn into a permanent extra cost.
+
+### Turning the model on
+
+`.env` is now **loaded**. Until this increment nothing opened it, so a key saved
+there never reached the provider ladder and every run truthfully reported that no
+model had run. An `export` in your shell still wins over the file.
+
+Loading it does **not** make anything live by itself, and that is deliberate:
+
+| path | with a key in `.env` |
+|---|---|
+| `python run.py` | deterministic. It passes `--no-llm`, so the launcher's offline promise is enforced rather than inherited |
+| `make eval`, `ablation`, `sweep` | deterministic **by construction**. These write published numbers, and `EVALUATION.md` reproducing byte-for-byte must not depend on who has a credential |
+| the dashboard's **Your files** tab | a tick-box, off by default. Tick it and the model is called; the result says how many times |
+| `ledgerloop demo`, `ledgerloop run` | honour the key, as they always did |
+| `ledgerloop llm-report` | the command that exists to measure the model path |
+
+A key is a *capability*, not an instruction. Nothing spends your quota because
+you once saved a credential.
 
 **The production LLM path has been measured live, against real Gemini**
 (`gemini-3.6-flash`, fallback depth 0) — `EVALUATION.md` reports it under *The

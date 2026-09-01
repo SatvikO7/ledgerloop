@@ -152,6 +152,78 @@ class IngestResult:
         return iter(self.normalized)
 
 
+def ingest_available(
+    directory: Path,
+    *,
+    strict: bool = False,
+    default_date_order: DateOrder = DateOrder.DAY_FIRST,
+) -> IngestResult:
+    """Parse whichever of the three sources are present, and no others.
+
+    :func:`ingest_dataset` requires all three and raises otherwise, which is
+    right for a generated corpus: a split missing a file is a broken split. It
+    is wrong for a person who has a bank statement and a processor report and no
+    order ledger, which is an ordinary state of affairs and the reason this
+    exists.
+
+    A source that is absent contributes an empty tuple rather than a placeholder
+    record, so nothing downstream can mistake "not supplied" for "supplied and
+    empty". What such a corpus can actually reconcile is a separate question,
+    answered by :func:`~ledgerloop.ui.uploads.assess` rather than guessed at
+    here -- this function only reads what it was given.
+
+    **The parsers, the normalisation and the problem log are the same ones
+    ``ingest_dataset`` uses.** There is no second reader.
+    """
+    started_ns = time.perf_counter_ns()
+    log = ProblemLog(strict=strict)
+
+    orders: tuple[CanonicalOrder, ...] = ()
+    if (directory / LEDGER_FILE).is_file():
+        orders = parse_ledger_csv(directory / LEDGER_FILE, log)
+
+    payments: tuple[CanonicalPayment, ...] = ()
+    settlements: tuple[CanonicalSettlement, ...] = ()
+    if (directory / PSP_FILE).is_file():
+        psp = parse_psp_json(directory / PSP_FILE, log)
+        payments, settlements = psp.payments, psp.settlements
+
+    bank_txns: tuple[CanonicalBankTxn, ...] = ()
+    narrations: dict[str, NarrationParse] = {}
+    # No bank file means no date column was scanned, so the evidence is
+    # *empty* rather than merely unproven: zero witnesses of either convention.
+    date_order = DateOrderEvidence(
+        order=default_date_order,
+        proven=False,
+        day_first_witnesses=0,
+        month_first_witnesses=0,
+        ambiguous_values=0,
+        unparsable_values=0,
+        total_values=0,
+    )
+    if (directory / BANK_FILE).is_file():
+        bank = parse_bank_csv(
+            directory / BANK_FILE, log, default_date_order=default_date_order
+        )
+        bank_txns, narrations, date_order = (
+            bank.transactions,
+            bank.narrations,
+            bank.date_order,
+        )
+
+    elapsed_ms = (time.perf_counter_ns() - started_ns) // 1_000_000
+    return IngestResult(
+        orders=orders,
+        payments=payments,
+        settlements=settlements,
+        bank_txns=bank_txns,
+        problems=log.problems,
+        date_order=date_order,
+        narrations=narrations,
+        wall_clock_ms=int(elapsed_ms),
+    )
+
+
 def ingest_dataset(
     directory: Path,
     *,

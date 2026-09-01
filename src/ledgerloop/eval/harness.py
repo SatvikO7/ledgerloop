@@ -58,7 +58,7 @@ from ledgerloop.eval.truth_io import DatasetManifest, load_ground_truth, load_ma
 from ledgerloop.exceptions import classify_exceptions, mark_resolvable, resolve_bounded
 from ledgerloop.exceptions.resolver import ResolutionOutcome
 from ledgerloop.ingest import ingest_dataset
-from ledgerloop.ingest.dataset import IngestResult
+from ledgerloop.ingest.dataset import IngestResult, ingest_available
 from ledgerloop.llm.client import LLMClient
 from ledgerloop.llm.integration import (
     LLMRunSummary,
@@ -327,6 +327,128 @@ def assemble_system_run(
         cost=cost,
         llm=llm,
         llm_available=setup.llm_active,
+    )
+
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """One reconciliation over files nobody has an answer key for.
+
+    ``run_system`` scores; this does not, and cannot. Precision, recall and the
+    match rate are all computed against ``GroundTruth.evaluation_pairs``, and a
+    real bank statement does not come with one -- producing it means a person
+    reconciling the corpus by hand, which is the work this tool automates.
+
+    So the figures here are all statements about what the system **did**, never
+    about whether it was right: how many links it committed, what they were
+    worth, and what it refused and sent to a person instead. Those are the
+    honest numbers for uploaded data, and they are the ones the upload screen
+    shows.
+    """
+
+    ingest: IngestResult
+    matched: MatchRun
+    exceptions: tuple[ReconException, ...]
+    llm_calls: int
+    llm_used: bool
+    """Whether a model actually answered -- **calls made**, not a key existing.
+
+    Read from the run's own cost ledger. A dashboard that reported "LLM used"
+    because a credential was present would be claiming something it had not
+    observed, and it is the one claim that would undo the deterministic result.
+    """
+
+    @property
+    def committed_links(self) -> int:
+        """Payment-to-bank links the policy committed without a human."""
+        return len(self.matched.predictions)
+
+    @property
+    def committed_minor(self) -> int:
+        """What those links were claimed to be worth, in paise.
+
+        Summed from the predictions themselves. Not compared with anything,
+        because there is nothing to compare it with.
+        """
+        return sum(link.amount_minor for link in self.matched.predictions)
+
+    @property
+    def queue_size(self) -> int:
+        return len(self.exceptions)
+
+    @property
+    def queue_minor(self) -> int:
+        return sum(item.impact_minor for item in self.exceptions)
+
+
+def reconcile_only(
+    directory: Path,
+    *,
+    config: RunConfig | None = None,
+    bundle: CalibrationBundle | None = None,
+    client: LLMClient | None = None,
+) -> ReconcileResult:
+    """Ingest, match and classify a directory that has **no ground truth**.
+
+    The path a person's own files take. It is the same sequence ``run_system``
+    runs, calling the same functions in the same order, and it stops where the
+    scorer would begin::
+
+        ingest_available -> [repair narrations] -> run_matching
+                         -> classify_exceptions -> resolve_bounded
+
+    Two differences from ``run_system``, both forced by the absence of an answer
+    key rather than chosen:
+
+    * :func:`~ledgerloop.ingest.dataset.ingest_available` instead of
+      ``ingest_dataset``, because a person may not have all three sources.
+    * no ``prepare_run``: that loads the manifest and the ground truth, and
+      neither exists here. The config is supplied or defaulted instead.
+
+    **Nothing about matching changes.** The tiers, the thresholds, the guards and
+    the refusals are the objects ``run_system`` uses, reached through the same
+    call. A corpus that does have truth still goes through ``run_system``; this
+    is not a second pipeline, it is the same one with the scorer left off.
+    """
+    run_config = config or RunConfig(run_id="uploaded")
+    ingested = ingest_available(directory)
+
+    llm_ready = client is not None and client.enabled
+    if llm_ready and 5 in run_config.enabled_tiers:
+        assert client is not None
+        ingested, _ = repair_narrations(
+            client, ingested, batch_size=run_config.llm.narration_batch_size
+        )
+
+    adjudicator = None
+    if llm_ready and 5 in run_config.enabled_tiers:
+        assert client is not None
+        adjudicator = adjudicator_for(client, run_config)
+
+    matched = run_matching(
+        ingested, run_config, bundle=bundle, adjudicator=adjudicator
+    )
+    assert matched.context is not None  # run_matching always sets it
+    queue = classify_exceptions(
+        matched.context,
+        matched.decisions,
+        matched.candidates,
+        run_config,
+        merchant_profiles=matched.merchant_spellings,
+    )
+    resolutions = resolve_bounded(queue.exceptions, run_config.auto_resolution)
+    exceptions = tuple(mark_resolvable(queue.exceptions, resolutions))
+
+    # Observed, not permitted. `client.enabled` says a ladder was built; the
+    # cost ledger says a model answered.
+    calls = client.ledger().llm_calls if client is not None else 0
+    return ReconcileResult(
+        ingest=ingested,
+        matched=matched,
+        exceptions=exceptions,
+        llm_calls=calls,
+        llm_used=calls > 0,
     )
 
 

@@ -59,6 +59,7 @@ from ledgerloop.agent.graph import langgraph_available
 from ledgerloop.agent.runner import run_graph
 from ledgerloop.agent.store import RUNS_ROOT
 from ledgerloop.config import SPLIT_SIZES, GeneratorConfig, LLMConfig, RunConfig
+from ledgerloop.envfile import load_env_file
 from ledgerloop.eval.ablation import ABLATION_LADDERS, AblationArtifact, run_ablation
 from ledgerloop.eval.artifacts import ComparisonArtifact, LLMReportArtifact, ScalePoint
 from ledgerloop.eval.baselines import run_b0, run_b1
@@ -856,6 +857,23 @@ def _run_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deterministic_client() -> LLMClient:
+    """A client that is off, whatever the environment holds.
+
+    The commands that write **published** numbers use this. Until `.env` was
+    loaded they were deterministic by *accident* -- no key was present on the
+    machine, so the ladder built no rung -- and `EVALUATION.md`'s byte-identity
+    guarantee rested on that accident. Making a key reachable would have turned
+    `make eval` live for anyone who had one, silently, and the committed report
+    would have stopped reproducing.
+
+    So the guarantee is now stated rather than inherited. A live measurement of
+    the model path is what `ledgerloop llm-report` exists for, and it prints a
+    banner saying whether it got one.
+    """
+    return LLMClient(config=LLMConfig(enabled=False), provider=None)
+
+
 def _client_for(args: argparse.Namespace, *, max_calls: int | None = None) -> LLMClient:
     """The client a command should use, or a disabled one.
 
@@ -1023,7 +1041,7 @@ def _run_eval(args: argparse.Namespace) -> int:
     truth = load_ground_truth(directory)
     tag = f"{manifest.split.value}-{manifest.seed}"
 
-    client = _client_for(args)
+    client = _deterministic_client()
     try:
         bundle = _resolve_bundle(args.calibration, directory)
     except (FileNotFoundError, StaleCalibrationError) as exc:
@@ -1420,6 +1438,16 @@ def _run_scale(args: argparse.Namespace) -> int:
 
 
 def _run_llm_report(args: argparse.Namespace) -> int:
+    # The one command whose whole purpose is to reach a model, so it is the one
+    # command that reads `.env`.
+    #
+    # Loading it in `main()` was tried and reverted. It made *every* command
+    # environment-dependent: with a key on disk the demo silently enabled T5, so
+    # its run id became `t0t5-test-42`, its audit log grew from 704 events to
+    # 710, and four tests failed on a machine that happened to have a `.env`.
+    # A credential sitting in a file must not change what a deterministic
+    # command produces. An `export` still works everywhere, as it always has.
+    load_env_file()
     """One measured run of the production LLM path, with its own control.
 
     Refuses rather than degrades when a live run was asked for and no provider
@@ -1831,7 +1859,7 @@ def _run_ablation(args: argparse.Namespace) -> int:
         return 1
 
     def factory() -> LLMClient:
-        return _client_for(args)
+        return _deterministic_client()
 
     probe = factory()
     try:
@@ -1890,7 +1918,7 @@ def _run_sweep(args: argparse.Namespace) -> int:
         return 1
 
     def factory() -> LLMClient:
-        return _client_for(args)
+        return _deterministic_client()
 
     probe = factory()
     try:

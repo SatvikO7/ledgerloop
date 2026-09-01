@@ -33,6 +33,13 @@ either. **No API key is required**; the demo path is deterministic and offline, 
 live LLM stays optional. A failed reconciliation stops the launcher rather than opening
 an empty dashboard.
 
+The dashboard opens on **Your files**: drop in a bank statement, a payment
+processor report, an order ledger — **whichever you have**. LedgerLoop tells you
+what that combination can actually reconcile instead of demanding all three. A
+processor report and a bank statement together are the minimum for a real
+reconciliation; any single file can be read but not matched, because
+reconciliation is a statement about two records agreeing.
+
 Full instructions in **[DEMO.md](DEMO.md)**. No API key, no database, no Docker, no Make.
 
 ---

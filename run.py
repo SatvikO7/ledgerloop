@@ -85,11 +85,24 @@ PORT_SEARCH_LIMIT = 20
 def demo_command() -> list[str]:
     """The canonical deterministic demo, as ``DEMO.md`` documents it.
 
-    ``--no-ui`` is the only argument: every other default -- the corpus, the
-    seed, the split, where the run record goes -- belongs to the demo command and
-    is not the launcher's to have an opinion about.
+    Two arguments, and both are about what the launcher promises rather than
+    about the corpus. Every other default -- the seed, the split, where the run
+    record goes -- belongs to the demo command and is not the launcher's to have
+    an opinion about.
+
+    ``--no-ui`` so a failed reconciliation cannot reach a dashboard.
+
+    ``--no-llm`` so the launcher is **deterministic and offline, always**. This
+    file has claimed that since it was written, and until `.env` was loaded it
+    was true by accident: no credential reached the process, so no ladder was
+    built. Now that a saved key does reach it, the promise has to be stated. A
+    configured model is a *capability*, not an instruction, and a reviewer
+    running this for the first time should get the fast repeatable path rather
+    than a network round trip they did not ask for. The model is one tick-box
+    away inside the dashboard, and `ledgerloop demo` without this flag still
+    honours a key.
     """
-    return [sys.executable, "-m", "ledgerloop.cli", "demo", "--no-ui"]
+    return [sys.executable, "-m", "ledgerloop.cli", "demo", "--no-ui", "--no-llm"]
 
 
 def streamlit_command(*, port: int = DEFAULT_PORT, headless: bool = False) -> list[str]:
