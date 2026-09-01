@@ -51,6 +51,30 @@ Everything below assumes the venv's interpreter. On Windows that is
 ## 2. The demo, in one command
 
 ```bash
+python run.py
+```
+
+`run.py` sits at the repository root and is the shortest path for a reviewer. It is a
+**launcher, not a second pipeline** — it holds no reconciliation logic, no metric and no
+money arithmetic. It:
+
+1. checks this is a usable checkout and that the dependencies are present, naming the
+   documented install command if they are not (it never installs anything itself);
+2. runs `python -m ledgerloop.cli demo --no-ui` — the deterministic pipeline, **no API
+   key**, exactly as described below;
+3. **stops if that fails**, printing the command that failed, rather than opening a
+   dashboard onto a broken run;
+4. otherwise starts `python -m streamlit run src/ledgerloop/ui/app.py` on this same
+   interpreter, attached to your terminal, so Ctrl-C stops it cleanly.
+
+`python run.py --no-browser` starts the dashboard without opening a browser tab, and
+`python run.py --help` lists both options. If something is already serving on port 8501
+it moves up to the next free port and says so, rather than stacking a confusing second
+instance.
+
+The lower-level commands are unchanged and are what a developer should use:
+
+```bash
 python -m ledgerloop.cli demo
 ```
 

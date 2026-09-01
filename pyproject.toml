@@ -68,7 +68,12 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
-packages = ["ledgerloop"]
+# `files` rather than `packages` because mypy accepts only one of them, and the
+# root launcher is not part of the package -- `packages = ["ledgerloop"]` alone
+# would leave `run.py` unchecked, and an unchecked file is exactly where a
+# launcher rots. `mypy_path = "src"` still makes the first entry resolve as the
+# `ledgerloop` package, so the check is the same one plus one more file.
+files = ["src/ledgerloop", "run.py"]
 plugins = []
 
 # `core` in PLAN.md §10/§17 was never a real directory. It is defined here as
