@@ -34,8 +34,6 @@ live LLM stays optional. A failed reconciliation stops the launcher rather than 
 an empty dashboard.
 
 Full instructions in **[DEMO.md](DEMO.md)**. No API key, no database, no Docker, no Make.
-In a hurry? **[PITCH.md](PITCH.md)** is a five-minute walkthrough — what to run, what to
-look at, and the numbers worth saying out loud.
 
 ---
 
