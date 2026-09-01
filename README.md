@@ -612,7 +612,13 @@ worth knowing before you look:
   reports the latest run; note the repository is private, so the badge renders only for
   someone who can see the repository.
 - **Synthetic data only.** Eleven anomaly classes at controlled prevalence from a seeded
-  generator. Nothing here has met a real bank statement.
+  generator, plus the second construction model in `generator/adversarial.py`. Nothing here
+  has met a real bank statement. **Real-data validation is blocked on a truth set, not on a
+  file:** every metric in this repository is computed against the link-level
+  `(payment, bank_txn)` edges in `GroundTruth.evaluation_pairs`, and a real ledger, PSP
+  report and bank statement do not carry those — producing them means reconciling the corpus
+  by hand, which is the work this system automates. So validating against real data needs a
+  real corpus *and* an independently produced, human-verified reconciliation of it.
 
 ## MVP scope
 
