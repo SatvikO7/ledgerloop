@@ -589,12 +589,20 @@ worth knowing before you look:
   denominator in the report — thirty records on seed 42 — and 30 of 30 does **not**
   demonstrate ≥ 0.95 from thirty records: the 95% Wilson interval is [0.8865, 1.0000] and
   the target sits inside it. The report calls that *undecided* rather than a pass.
-- **T3's exactness rule is empirical on one generator.** In this corpus a payout equals its
-  net by construction and drift is injected on the ledger/PSP side, which is why 543 of 543
-  legitimate matches are exact. A real statement that credited a genuinely different amount
-  against an unreferenced settlement would now be **refused rather than matched** — recall
-  would fall and precision would hold, which is the trade this project makes everywhere
-  else, but it has not been tested against such data.
+- **T3's exactness rule now has two sources of evidence, and it costs real recall.** In the
+  main generator a payout equals its net by construction, which is why 543 of 543 legitimate
+  matches are exact — and *why that generator could not test its own assumption*: the class
+  that moves a credit off its net and the class that strips the reference cannot land on the
+  same settlement there. A second construction model (`ledgerloop.generator.adversarial`),
+  where the bank deducts a charge the PSP file never sees and the deduction is independent
+  of whether the narration kept its reference, was built to break that coupling. On it,
+  legitimate reference-free matches with non-exact amounts **do exist**, and the rule
+  refuses all of them: recall 0.2764 ± 0.0085 against 0.4809 ± 0.0176 for the tolerance
+  band it replaced. **Re-admitting the band is still worse**, on the same corpus, at five
+  seeds: precision 0.8469 → 0.7729, false positives 226 → 639, and among the ones it buys
+  back are 36 reconstructions of the exact defect Phase 2.10 closed. So the rule stands,
+  the cost is measured rather than assumed, and real-data validation is still outstanding.
+  Reproduce with `pytest tests/unit/test_t3_exactness_validation.py`.
 - **The scale curve is four sizes at five seeds, on one machine, at one difficulty.** It is
   not a performance characterisation, and the throughput figures describe the machine that
   produced them. The 300-order end stays noisy (sd 0.0980) because ~27 settlements is a
@@ -642,7 +650,7 @@ make eval    # generate -> calibrate -> ablation -> sweep -> B2
              #          -> before/after comparison -> LLM report -> EVALUATION.md
 ```
 
-A snapshot of `EVALUATION.md` and the full `ARCHITECTURE.md` (51 numbered design decisions)
+A snapshot of `EVALUATION.md` and the full `ARCHITECTURE.md` (76 numbered design decisions)
 are committed, so the reasoning and the numbers ship with the repository. `make eval`
 regenerates the report in place; two runs differ only in one labelled block of measured
 timings, and two tests enforce that.
