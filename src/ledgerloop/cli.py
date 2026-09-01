@@ -1547,7 +1547,7 @@ def _run_demo(args: argparse.Namespace) -> int:
     print("  1. generate    three heterogeneous sources plus link-level ground truth")
     print("  2. calibrate   fit the blender and tau_high on train + calibration")
     print("  3. reconcile   run the LangGraph pipeline over the demo corpus")
-    print("  4. inspect     open the four screens")
+    print("  4. inspect     open the dashboard")
     print()
 
     # --- 1. generate -------------------------------------------------------
@@ -1696,7 +1696,7 @@ def _run_demo(args: argparse.Namespace) -> int:
 
     # --- 4. the UI ---------------------------------------------------------
     print()
-    print("[4/4] the four screens")
+    print("[4/4] the dashboard")
     # Located by path rather than by import: importing the module would make
     # Streamlit a hard dependency of the CLI, and `ledgerloop eval` must keep
     # working without either optional extra.
@@ -1707,7 +1707,8 @@ def _run_demo(args: argparse.Namespace) -> int:
         return 0
     print("      opening Streamlit. Ctrl-C to stop.")
     print(
-        "      Run · Results · Exceptions · Audit replay. Every number is read "
+        "      Overview · Needs attention · Transactions · Why it matched · "
+        "Technical report. Every number is read "
         "from the run record; the UI computes nothing."
     )
     print()

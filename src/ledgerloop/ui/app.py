@@ -23,17 +23,26 @@ The only action that runs anything is the button on the **Run** tab, and it
 calls :func:`~ledgerloop.agent.runner.run_graph` -- the same entry point
 ``ledgerloop run`` uses.
 
-WHAT THE REDESIGN CHANGED, AND WHY
------------------------------------
-The first version was four screens of tables that answered a developer's
-questions in a developer's order. The story a reviewer actually needs is one
-sentence -- *how much money was reconciled, how accurate was it, what is left,
-and why* -- and the layout now follows it:
+WHO THE SCREENS ARE FOR
+-----------------------
+The layout answers a **non-technical** reader's questions, in the order they ask
+them, and puts the developer's vocabulary one tab away:
 
-**Overview** answers it in one screen. **Pipeline** shows how the answer was
-reached, rung by rung. **Exceptions** is the controller's workday. **Evidence**
-takes a single record apart for someone who does not trust the summary.
-**Evaluation** is the measurement, intervals included.
+* **Overview** -- how many matched, how much money, what needs a person, was
+  anything matched wrongly. Four numbers, about five seconds.
+* **Needs attention** -- the queue, led by the rupee figure, with the
+  classifier's own plain-English cause and action.
+* **Transactions** -- every decision, filterable and searchable.
+* **Why it matched** -- one record, explained without jargon.
+* **Technical report** -- the measurement in ``EVALUATION.md``'s vocabulary:
+  KPIs with their intervals and verdicts, the six-rung ladder, per-class recall,
+  the money table and the full audit replay. **Nothing was deleted to make the
+  other screens clean**; it was moved, and a glossary sits at the top of it
+  translating every term it uses.
+
+The plain wording lives in :mod:`ledgerloop.ui.plain`, which translates the
+stored run and computes nothing -- so the two vocabularies cannot become two
+sets of numbers.
 
 Three presentation rules survive from the tables and are load-bearing:
 
@@ -44,6 +53,10 @@ Three presentation rules survive from the tables and are load-bearing:
   T4's honest zero and T5's absence do not look alike.
 * **No proportion is rendered without its interval.** ``Kpi`` has no accessor
   that returns a bare estimate with nothing beside it.
+* **The plain screens never claim more than was measured.** The overview says
+  *0 incorrect matches*, which is a count. Whether that clears a 99% target at
+  this sample size is a statistical ruling, and it stays in the report beside
+  its interval where it can be read properly.
 
 WHY STREAMLIT AND NOT REACT
 ---------------------------
@@ -69,9 +82,21 @@ from ledgerloop.agent.graph import langgraph_available
 from ledgerloop.agent.store import RUNS_ROOT, StoredRun, list_runs
 from ledgerloop.config import GeneratorConfig
 from ledgerloop.generator import generate_to_disk
-from ledgerloop.models.enums import Difficulty, SplitName
+from ledgerloop.models.enums import DecisionOutcome, Difficulty, SplitName
 from ledgerloop.models.metrics import Verdict
 from ledgerloop.money import format_minor
+from ledgerloop.ui.plain import (
+    AttentionItem,
+    Bucket,
+    attention_items,
+    buckets,
+    glossary,
+    match_story,
+    safety_note,
+    snapshot,
+    transaction_rows,
+    transaction_search,
+)
 from ledgerloop.ui.views import (
     OUTCOME_HELP,
     Headline,
@@ -260,6 +285,108 @@ _STYLE = """
     color: var(--ll-muted); font-weight: 700;
   }
   .ll-chain .ll-step-body { font-size: 0.9rem; color: var(--ll-ink); }
+
+  /* --- the plain-language screens ------------------------------------- */
+  /* Bigger, fewer, and colour-coded by meaning. A reconciliation lead should
+     be able to read the four numbers that matter from across a room, so these
+     cards are deliberately not the same size as the technical ones. */
+  .ll-big-grid { display: flex; flex-wrap: wrap; gap: 0.9rem; margin: 0.2rem 0 0.6rem; }
+  .ll-big-card {
+    flex: 1 1 220px; border-radius: 16px; padding: 1.15rem 1.25rem;
+    border: 1px solid var(--ll-line); background: var(--ll-surface);
+  }
+  .ll-big-card .ll-top {
+    font-size: 0.82rem; font-weight: 700; letter-spacing: 0.01em;
+    display: flex; align-items: center; gap: 0.4rem;
+  }
+  .ll-big-card .ll-num {
+    font-size: 2.5rem; font-weight: 800; line-height: 1.05;
+    margin: 0.35rem 0 0.1rem; color: var(--ll-ink); letter-spacing: -0.03em;
+  }
+  .ll-big-card .ll-money {
+    font-size: 1.75rem; font-weight: 800; line-height: 1.15;
+    margin: 0.35rem 0 0.1rem; color: var(--ll-ink); letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
+  }
+  .ll-big-card .ll-cap { font-size: 0.84rem; color: var(--ll-muted); line-height: 1.35; }
+  .ll-big-card.ll-t-good { border-color: rgba(5, 150, 105, 0.42); background: var(--ll-good-soft); }
+  .ll-big-card.ll-t-good .ll-top { color: var(--ll-good); }
+  .ll-big-card.ll-t-warn { border-color: rgba(217, 119, 6, 0.42); background: var(--ll-warn-soft); }
+  .ll-big-card.ll-t-warn .ll-top { color: var(--ll-warn); }
+  .ll-big-card.ll-t-bad  { border-color: rgba(220, 38, 38, 0.42); background: var(--ll-bad-soft); }
+  .ll-big-card.ll-t-bad  .ll-top { color: var(--ll-bad); }
+  .ll-big-card.ll-t-brand { border-color: rgba(79, 70, 229, 0.42); }
+  .ll-big-card.ll-t-brand .ll-top { color: var(--ll-brand); }
+  .ll-big-card.ll-t-muted .ll-top { color: var(--ll-muted); }
+
+  /* The where-did-everything-go picture. One row, three destinations. */
+  .ll-split { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-top: 0.3rem; }
+  .ll-dest {
+    flex: 1 1 190px; border-radius: 14px; padding: 0.85rem 1rem;
+    border: 1px solid var(--ll-line); background: var(--ll-surface);
+  }
+  .ll-dest .ll-dest-head { font-size: 0.9rem; font-weight: 700; }
+  .ll-dest .ll-dest-num {
+    font-size: 2rem; font-weight: 800; color: var(--ll-ink); line-height: 1.1;
+    margin: 0.2rem 0 0.25rem; letter-spacing: -0.02em;
+  }
+  .ll-dest .ll-dest-note { font-size: 0.8rem; color: var(--ll-muted); line-height: 1.35; }
+  .ll-dest.ll-t-good { border-color: rgba(5, 150, 105, 0.4); }
+  .ll-dest.ll-t-good .ll-dest-head { color: var(--ll-good); }
+  .ll-dest.ll-t-warn { border-color: rgba(217, 119, 6, 0.4); }
+  .ll-dest.ll-t-warn .ll-dest-head { color: var(--ll-warn); }
+  .ll-dest.ll-t-muted .ll-dest-head { color: var(--ll-muted); }
+
+  /* The safety banner. The project's strongest property, stated once, large. */
+  .ll-safe {
+    border-radius: 16px; padding: 1.1rem 1.3rem; margin: 0.5rem 0 0.2rem;
+    border: 1px solid rgba(5, 150, 105, 0.42); background: var(--ll-good-soft);
+  }
+  .ll-safe.ll-t-bad { border-color: rgba(220, 38, 38, 0.45); background: var(--ll-bad-soft); }
+  .ll-safe .ll-safe-title {
+    font-size: 1.45rem; font-weight: 800; color: var(--ll-good); letter-spacing: -0.02em;
+  }
+  .ll-safe.ll-t-bad .ll-safe-title { color: var(--ll-bad); }
+  .ll-safe .ll-safe-body {
+    font-size: 0.95rem; color: var(--ll-ink); margin-top: 0.3rem; line-height: 1.45;
+  }
+
+  /* One queue item, led by the money and closed by the action. */
+  .ll-item {
+    border: 1px solid var(--ll-line); border-left: 4px solid var(--ll-warn);
+    border-radius: 12px; padding: 0.85rem 1rem; margin-bottom: 0.55rem;
+    background: var(--ll-surface);
+  }
+  .ll-item .ll-item-amt {
+    font-size: 1.35rem; font-weight: 800; color: var(--ll-ink); letter-spacing: -0.02em;
+  }
+  .ll-item .ll-item-sub { font-size: 0.8rem; color: var(--ll-muted); }
+  .ll-item .ll-item-body {
+    font-size: 0.92rem; color: var(--ll-ink); margin-top: 0.5rem; line-height: 1.5;
+  }
+  .ll-item .ll-item-act {
+    font-size: 0.9rem; margin-top: 0.5rem; padding-top: 0.5rem;
+    border-top: 1px dashed var(--ll-line); color: var(--ll-ink); line-height: 1.45;
+  }
+  .ll-item.ll-sev-critical { border-left-color: var(--ll-bad); }
+  .ll-item.ll-sev-low { border-left-color: var(--ll-idle); }
+
+  /* The "why we matched it" reason list. Ticks, not bullet points. */
+  .ll-reasons { list-style: none; padding-left: 0; margin: 0.4rem 0 0; }
+  .ll-reasons li {
+    font-size: 0.95rem; color: var(--ll-ink); line-height: 1.5;
+    padding: 0.25rem 0 0.25rem 1.6rem; position: relative;
+  }
+  .ll-reasons li::before {
+    content: "✓"; position: absolute; left: 0; top: 0.25rem;
+    color: var(--ll-good); font-weight: 800;
+  }
+  .ll-reasons.ll-open li::before { content: "•"; color: var(--ll-muted); }
+
+  .ll-lede {
+    font-size: 1.02rem; color: var(--ll-ink); line-height: 1.55;
+    max-width: 62ch; margin: 0.2rem 0 0.9rem;
+  }
 </style>
 """
 
@@ -395,8 +522,9 @@ def _hero(run: StoredRun | None) -> None:
         ) + "</div>"
     st.markdown(
         '<div class="ll-hero"><h1>LedgerLoop</h1>'
-        "<p>Confidence-aware payment reconciliation &mdash; ledger &harr; PSP "
-        "settlements &harr; bank statement, with an honest exception list.</p>"
+        "<p>Automatic payment reconciliation &mdash; it compares your payments, "
+        "your bank transactions and your settlement records, and only matches "
+        "what it can prove.</p>"
         f"{chips}</div>",
         unsafe_allow_html=True,
     )
@@ -642,10 +770,10 @@ def screen_exceptions(run: StoredRun) -> None:
     severity_options = ["all", *severities]
     class_options = ["all", *classes]
     severity = _picked(
-        columns[0].selectbox("Severity", severity_options), severity_options
+        columns[0].selectbox("Severity", severity_options, key="q_sev"), severity_options
     )
     exception_class = _picked(
-        columns[1].selectbox("Class", class_options), class_options
+        columns[1].selectbox("Class", class_options, key="q_class"), class_options
     )
 
     shown = exception_rows(
@@ -718,7 +846,7 @@ def screen_evidence(run: StoredRun) -> None:
         st.info("This run recorded no decisions or exceptions.")
         return
 
-    chosen = _picked(st.selectbox("Record", keys), keys)
+    chosen = _picked(st.selectbox("Record", keys, key="audit_record"), keys)
     trace = trace_record(run, chosen)
 
     st.subheader(f"Final outcome: `{trace.outcome}`")
@@ -901,6 +1029,441 @@ def screen_evaluation(run: StoredRun) -> None:
 
 
 # --------------------------------------------------------------------------
+# The plain-language screens
+#
+# Everything above this line is the technical view and is unchanged. These
+# screens render the *same stored run* for a reader who has never met a tier, a
+# Wilson interval or a residual pass. Nothing here recomputes anything: the
+# translation lives in `ui/plain.py`, and every number comes off the run record.
+# --------------------------------------------------------------------------
+_TONE_SUFFIX = {
+    "good": "ll-t-good",
+    "warn": "ll-t-warn",
+    "bad": "ll-t-bad",
+    "brand": "ll-t-brand",
+    "muted": "ll-t-muted",
+}
+
+_TICK = "✓"
+_WARN = "⚠"
+_RING = "○"
+_SHIELD = "\U0001f6e1"
+_RUPEE = "₹"
+
+
+def _big_card(
+    icon: str, label: str, value: str, caption: str, tone: str, *, money: bool = False
+) -> str:
+    """One headline number, large enough to read from across a room."""
+    size = "ll-money" if money else "ll-num"
+    return (
+        f'<div class="ll-big-card {_TONE_SUFFIX[tone]}">'
+        f'<div class="ll-top">{_esc(icon)} {_esc(label)}</div>'
+        f'<div class="{size}">{_esc(value)}</div>'
+        f'<div class="ll-cap">{_esc(caption)}</div>'
+        "</div>"
+    )
+
+
+def _destination(bucket: Bucket) -> str:
+    icon = {"check": _TICK, "review": _WARN, "open": _RING}[bucket.icon]
+    return (
+        f'<div class="ll-dest {_TONE_SUFFIX[bucket.tone]}">'
+        f'<div class="ll-dest-head">{_esc(icon)} {_esc(bucket.label)}</div>'
+        f'<div class="ll-dest-num">{bucket.count:,}</div>'
+        f'<div class="ll-dest-note">{_esc(bucket.note)}</div>'
+        "</div>"
+    )
+
+
+#: The ladder in a reader's words. Deliberately five steps and not six: T4 and
+#: T5 are collapsed into "left for review" here because a non-technical reader
+#: cares where an item *ends up*, not which of two internal rungs declined it.
+#: The full six-rung measurement is one tab away and is not softened there.
+_PLAIN_STEPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "1",
+        "Exact match",
+        "The payment reference is on the bank transaction and the amounts agree exactly.",
+    ),
+    (
+        "2",
+        "Close match",
+        "The reference agrees and the amounts line up once the processor's fee is "
+        "allowed for.",
+    ),
+    (
+        "3",
+        "Grouped payout",
+        "Many payments paid out as one bank credit, worked back to the individual "
+        "payments.",
+    ),
+    (
+        "4",
+        "Name and amount",
+        "No reference on the bank line, so the business name and the exact amount "
+        "are used instead.",
+    ),
+    (
+        "5",
+        "Left for review",
+        "Not enough evidence. It goes to a person with a reason, rather than being "
+        "guessed.",
+    ),
+)
+
+
+def screen_home(run: StoredRun) -> None:
+    """The hero screen. The four answers, in about five seconds."""
+    view = snapshot(run)
+    st.markdown(
+        '<p class="ll-lede">LedgerLoop compares your payments, your bank '
+        "transactions and your settlement records, matches what it can prove, "
+        "and sends everything uncertain for review.</p>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            _TICK,
+            "Matched",
+            f"{view.matched:,}",
+            "payments reconciled automatically",
+            "good",
+        )
+        + _big_card(
+            _RUPEE,
+            "Amount reconciled",
+            view.reconciled,
+            "money safely accounted for",
+            "brand",
+            money=True,
+        )
+        + _big_card(
+            _WARN,
+            "Needs attention",
+            f"{view.needs_attention:,}",
+            "items waiting for a person",
+            "warn",
+        )
+        + _big_card(
+            _SHIELD,
+            "Incorrect matches",
+            f"{view.incorrect:,}",
+            "found in this run",
+            "good" if view.is_clean else "bad",
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    title, body = safety_note(run)
+    tone = "" if view.is_clean else " ll-t-bad"
+    st.markdown(
+        f'<div class="ll-safe{tone}">'
+        f'<div class="ll-safe-title">{_esc(_SHIELD)} {_esc(title)}</div>'
+        f'<div class="ll-safe-body">{_esc(body)}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+    st.subheader("Where everything went")
+    st.caption(
+        "Every payment ends in exactly one of these three places. Nothing is "
+        "silently dropped, and nothing is guessed into the first column."
+    )
+    st.markdown(
+        '<div class="ll-split">'
+        + "".join(_destination(bucket) for bucket in buckets(run))
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if view.referred:
+        st.caption(
+            f"{view.referred:,} of these were found and deliberately **not** "
+            "committed. LedgerLoop hands a case to a person rather than choose "
+            "between two possibilities."
+        )
+
+    st.divider()
+    st.subheader("How the matching works")
+    st.caption("Each step only looks at what the step before it could not settle.")
+    flow: list[str] = []
+    for index, (number, name, why) in enumerate(_PLAIN_STEPS):
+        if index:
+            flow.append('<div class="ll-arrow">&#8594;</div>')
+        css = "ll-rung ll-on" if index < len(_PLAIN_STEPS) - 1 else "ll-rung"
+        flow.append(
+            f'<div class="{css}">'
+            f'<div class="ll-tier">Step {_esc(number)}</div>'
+            f'<div class="ll-name">{_esc(name)}</div>'
+            f'<div class="ll-purpose">{_esc(why)}</div>'
+            "</div>"
+        )
+    st.markdown('<div class="ll-flow">' + "".join(flow) + "</div>", unsafe_allow_html=True)
+    st.caption(
+        "Engineers: these are tiers T0-T5. The rung-by-rung measurement, with "
+        "what each one proposed and what it refused, is in **Technical report**."
+    )
+
+    st.divider()
+    st.subheader("What to do next")
+    st.markdown(
+        f"1. Open **Needs attention** -- {view.needs_attention:,} item(s), "
+        "largest amount first. Each one says what was found and what to do.\n"
+        "2. Browse **Transactions** to see every payment that was matched.\n"
+        "3. Open **Why it matched** to check any single match against the "
+        "original documents."
+    )
+    if view.unmatchable:
+        st.info(
+            f"{view.unmatchable:,} record(s), worth {view.unmatchable_impact}, "
+            "cannot be resolved from the three source files at all -- the "
+            "information simply is not in them. They are reported separately so "
+            "that a real limit is never mistaken for a mistake."
+        )
+
+
+def _attention_card(item: AttentionItem) -> None:
+    severity = item.severity.lower()
+    css = f"ll-item ll-sev-{severity}" if severity in {"critical", "low"} else "ll-item"
+    st.markdown(
+        f'<div class="{css}">'
+        f'<div class="ll-item-amt">{_esc(item.amount)}</div>'
+        f'<div class="ll-item-sub">{_esc(item.subject)} &middot; '
+        f"{_esc(item.severity)} priority</div>"
+        f'<div class="ll-item-body"><strong>What we found.</strong> '
+        f"{_esc(item.found)}</div>"
+        f'<div class="ll-item-act"><strong>What to do.</strong> '
+        f"{_esc(item.action)}</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    with st.expander(f"Technical details for {item.subject}"):
+        st.write(
+            {
+                "Exception class": item.technical_class,
+                "Severity": item.severity,
+                "Impact (paise)": item.amount_minor,
+                "Evidence items": item.evidence_count,
+                "Agent may resolve": item.agent_may_resolve,
+                "Exception id": item.exception_id,
+            }
+        )
+        if not item.agent_may_resolve:
+            st.warning("Proposal only. This one needs a person.")
+
+
+#: How many queue items are drawn as cards before falling back to the table.
+#: The queue is sorted by money, so the cap keeps the most expensive items in
+#: the readable format and never hides one silently -- the count is printed.
+_CARD_LIMIT = 40
+
+
+def screen_attention(run: StoredRun) -> None:
+    """The review queue, led by money and written in plain English."""
+    items = attention_items(run)
+    if not items:
+        st.success("Nothing needs your attention in this run.")
+        return
+
+    total = sum(item.amount_minor for item in items)
+    st.subheader(f"{len(items):,} item(s) need your attention")
+    st.markdown(
+        '<p class="ll-lede">LedgerLoop did not find enough evidence to safely '
+        "settle these, or it found something that looks wrong. "
+        "<strong>Nothing was guessed.</strong> Each item says what was found and "
+        "what to do about it, largest amount first.</p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            _WARN,
+            "Items to review",
+            f"{len(items):,}",
+            "each with a reason and an action",
+            "warn",
+        )
+        + _big_card(
+            _RUPEE,
+            "Money involved",
+            format_minor(total),
+            "across every item in the queue",
+            "brand",
+            money=True,
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    severities = sorted({item.severity for item in items})
+    options = ["All", *severities]
+    chosen = _picked(st.selectbox("Show", options, key="attn_sev"), options)
+    shown = [item for item in items if chosen == "All" or item.severity == chosen]
+    if len(shown) != len(items):
+        st.caption(
+            f"Showing {len(shown)} of {len(items)}. Filtering changes this list "
+            "only -- the counts on Overview are read from the run itself."
+        )
+
+    for item in shown[:_CARD_LIMIT]:
+        _attention_card(item)
+    if len(shown) > _CARD_LIMIT:
+        st.caption(
+            f"Showing the {_CARD_LIMIT} largest of {len(shown)}. The rest are in "
+            "the full queue below."
+        )
+    with st.expander("The whole queue as a table (technical)"):
+        screen_exceptions(run)
+
+
+def screen_transactions(run: StoredRun) -> None:
+    """Every decision the run committed, filterable and searchable."""
+    rows = transaction_rows(run)
+    if not rows:
+        st.info("This run recorded no decisions.")
+        return
+
+    st.subheader("Transactions")
+    st.markdown(
+        '<p class="ll-lede">Every payment LedgerLoop reached a decision on, and '
+        "how it reached it.</p>",
+        unsafe_allow_html=True,
+    )
+    statuses = sorted({str(row["Status"]) for row in rows})
+    options = ["All", *statuses]
+    columns = st.columns([1, 2])
+    chosen = _picked(columns[0].selectbox("Status", options, key="tx_status"), options)
+    query = columns[1].text_input(
+        "Search",
+        placeholder="Payment or bank reference, e.g. PAY-00041",
+        key="tx_search",
+    )
+
+    shown = transaction_rows(run, status=None if chosen == "All" else chosen)
+    shown = transaction_search(shown, query or "")
+    st.caption(
+        f"Showing {len(shown):,} of {len(rows):,}. There is no amount column "
+        "because the run record does not store an amount per match -- the money "
+        "totals are on Overview, and every amount under review is in Needs "
+        "attention."
+    )
+    st.dataframe(
+        [
+            {
+                key: row[key]
+                for key in (
+                    "Status",
+                    "Payment",
+                    "Bank transaction",
+                    "How it was matched",
+                    "Confidence",
+                )
+            }
+            for row in shown
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def screen_why(run: StoredRun) -> None:
+    """One record, explained without jargon, with the jargon one click away."""
+    keys = record_keys(run)
+    if not keys:
+        st.info("This run recorded no decisions or exceptions.")
+        return
+
+    st.subheader("Why it matched")
+    st.markdown(
+        '<p class="ll-lede">Pick any record and see exactly why LedgerLoop '
+        "reached the conclusion it did, or why it refused to.</p>",
+        unsafe_allow_html=True,
+    )
+    # Matched records first. The tab is called "Why it matched", and opening a
+    # reviewer on a refusal buries the strongest thing the screen has to show.
+    # Every refusal is still one selection away and is explained just as fully.
+    matched_first = [
+        key
+        for key in keys
+        if any(
+            decision.outcome is DecisionOutcome.AUTO_MATCHED
+            for decision in run.decisions_for(key)
+        )
+    ]
+    seen = set(matched_first)
+    ordered = matched_first + [key for key in keys if key not in seen]
+    chosen = _picked(st.selectbox("Record", ordered, key="why_record"), ordered)
+    story = match_story(run, chosen)
+
+    if story.matched:
+        st.success(f"{_TICK} {story.headline}")
+    else:
+        st.warning(f"{_WARN} {story.headline}")
+
+    if story.partner:
+        st.markdown(f"**{chosen}** to **{story.partner}**")
+    if story.stage:
+        st.markdown(f"**How it was matched.** {story.stage}")
+
+    st.markdown("**Why:**")
+    css = "ll-reasons" if story.matched else "ll-reasons ll-open"
+    st.markdown(
+        f'<ul class="{css}">'
+        + "".join(f"<li>{_esc(reason)}</li>" for reason in story.reasons)
+        + "</ul>",
+        unsafe_allow_html=True,
+    )
+    if story.confidence:
+        st.markdown(f"**Confidence.** {story.confidence}")
+    if story.caveat:
+        st.info(story.caveat)
+
+    with st.expander("Technical details"):
+        st.write(dict(story.technical))
+        st.caption(
+            "Read from the append-only log this run wrote. Nothing here is "
+            "recomputed. The full event-by-event replay is in **Technical "
+            "report**."
+        )
+
+
+def screen_report(run: StoredRun) -> None:
+    """Everything a judge or an engineer needs, out of the normal user's way."""
+    st.subheader("Technical report")
+    st.markdown(
+        '<p class="ll-lede">The measurement, in the vocabulary '
+        "<code>EVALUATION.md</code> uses. Every figure is read from this run's "
+        "own record.</p>",
+        unsafe_allow_html=True,
+    )
+    with st.expander("What the technical terms mean", expanded=True):
+        st.dataframe(
+            [
+                {
+                    "Term": entry.term,
+                    "In plain words": entry.plain,
+                    "This run": entry.value,
+                }
+                for entry in glossary(headline(run))
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+    screen_overview(run)
+    st.divider()
+    screen_pipeline(run)
+    st.divider()
+    screen_evaluation(run)
+    st.divider()
+    screen_evidence(run)
+
+
+# --------------------------------------------------------------------------
 # The run launcher
 # --------------------------------------------------------------------------
 def screen_run() -> None:
@@ -1012,7 +1575,7 @@ def main() -> None:
     runs = list_runs(_runs_root())
     with st.sidebar:
         st.markdown("### LedgerLoop")
-        st.caption("Confidence-aware payment reconciliation")
+        st.caption("Automatic payment reconciliation")
         st.divider()
         st.markdown("**Runs**")
         if runs:
@@ -1030,38 +1593,48 @@ def main() -> None:
             config = selected.summary.get("config", {})
             st.divider()
             st.markdown("**This run**")
-            st.caption(
-                f"Split `{dataset.get('split', '?')}` · "
-                f"difficulty `{dataset.get('difficulty', '?')}` · "
-                f"seed `{dataset.get('seed', '?')}`\n\n"
-                f"{int(dataset.get('records', 0)):,} records · "
-                f"{int(dataset.get('evaluation_links', 0)):,} evaluation links\n\n"
-                f"Tuning hash `{config.get('tuning_hash', '?')}`"
-            )
-        st.divider()
-        st.caption(
-            f"Runs are read from `{_runs_root()}`. Each holds `run.json`, "
-            "`audit.jsonl`, `exceptions.json` and `decisions.json` -- the same "
-            "files the CLI writes. This interface renders them and computes "
-            "nothing."
-        )
+            st.caption(f"{int(dataset.get('records', 0)):,} records checked")
+            # Identifiers belong to whoever is reproducing a figure, and to
+            # nobody else. They stay one click away rather than greeting every
+            # reader with a tuning hash.
+            with st.expander("Run details"):
+                st.caption(
+                    f"Split `{dataset.get('split', '?')}` · "
+                    f"difficulty `{dataset.get('difficulty', '?')}` · "
+                    f"seed `{dataset.get('seed', '?')}`\n\n"
+                    f"{int(dataset.get('evaluation_links', 0)):,} evaluation links\n\n"
+                    f"Tuning hash `{config.get('tuning_hash', '?')}`\n\n"
+                    f"Read from `{_runs_root()}` -- `run.json`, `audit.jsonl`, "
+                    "`exceptions.json` and `decisions.json`, the same files the CLI "
+                    "writes. This interface renders them and computes nothing."
+                )
 
     _hero(selected)
 
+    # Five reader-facing screens, then the launcher. The order is the order a
+    # person asks the questions in: what happened, what do I do, show me
+    # everything, prove one of them, and only then the measurement.
     tabs = st.tabs(
-        ["Overview", "Pipeline", "Exceptions", "Evidence", "Evaluation", "Run"]
+        [
+            "Overview",
+            "Needs attention",
+            "Transactions",
+            "Why it matched",
+            "Technical report",
+            "Run",
+        ]
     )
     screens = (
-        screen_overview,
-        screen_pipeline,
-        screen_exceptions,
-        screen_evidence,
-        screen_evaluation,
+        screen_home,
+        screen_attention,
+        screen_transactions,
+        screen_why,
+        screen_report,
     )
     for tab, screen in zip(tabs[:5], screens, strict=True):
         with tab:
             if selected is None:
-                st.info("No run selected. Start one on the **Run** tab.")
+                st.info("No run yet. Start one on the **Run** tab.")
             else:
                 screen(selected)
     with tabs[5]:

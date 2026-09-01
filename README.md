@@ -98,7 +98,7 @@ extra item.
    exceptions.json · decisions.json
            │
            ▼
-   ui/  six sections: Overview · Pipeline · Exceptions · Evidence · Evaluation · Run
+   ui/  Overview · Needs attention · Transactions · Why it matched · Technical report
         reads the four files; computes nothing
 ```
 

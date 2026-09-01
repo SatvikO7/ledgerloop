@@ -69,7 +69,7 @@ class TestTheScriptRuns:
         assert not test.exception
         markdown = " ".join(item.value for item in test.markdown)
         assert "LedgerLoop" in markdown
-        assert "Confidence-aware payment reconciliation" in markdown
+        assert "Automatic payment reconciliation" in markdown
 
     def test_the_masthead_names_the_run_on_screen(self, workspace, monkeypatch):
         """The hero is the only place a reader learns which run they are
@@ -80,18 +80,27 @@ class TestTheScriptRuns:
         assert "app-run" in markdown
         assert "records" in markdown
 
-    def test_it_shows_the_six_sections(self, workspace, monkeypatch):
-        """The information architecture, in the order the story is told:
-        the answer, then how it was reached, then the work it leaves."""
+    def test_the_sections_are_named_for_a_reader_not_a_developer(
+        self, workspace, monkeypatch
+    ):
+        """The information architecture, in the order a person asks the
+        questions: what happened, what do I do, show me everything, prove
+        one of them -- and only then the measurement.
+
+        No tab is named after a component. "Pipeline", "Evidence" and
+        "Evaluation" were all developer words for developer screens; the
+        content survives inside **Technical report**, which is where a
+        reader who wants it will look and a reader who does not will not.
+        """
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
         labels = [tab.label for tab in test.tabs]
         assert labels == [
             "Overview",
-            "Pipeline",
-            "Exceptions",
-            "Evidence",
-            "Evaluation",
+            "Needs attention",
+            "Transactions",
+            "Why it matched",
+            "Technical report",
             "Run",
         ]
 
@@ -110,7 +119,7 @@ class TestTheScriptRuns:
         assert not test.exception
         messages = [item.value for item in test.info]
         assert any("No runs yet" in message for message in messages)
-        assert any("No run selected" in message for message in messages)
+        assert any("No run yet" in message for message in messages)
 
 
 class TestTheResultsScreen:
@@ -371,6 +380,198 @@ class TestNothingIsHardcoded:
         assert "n/a" in markdown
         assert any("predates stored intervals" in item.value for item in test.info)
 
+
+
+class TestItReadsWithoutJargon:
+    """The redesign's actual promise, tested as a promise rather than a layout.
+
+    A reader who has never met a tier, a Wilson interval or a residual pass must
+    still get the four answers. These tests check the words on the first screen,
+    because that is the only thing that decides whether the promise was kept.
+    """
+
+    #: Vocabulary a normal user should never meet before they choose to.
+    #: Every one of these still appears in **Technical report** and is asserted
+    #: to, elsewhere in this file -- the rule is about *placement*, not removal.
+    JARGON = (
+        "Wilson",
+        "residual",
+        "tranche",
+        "lexical",
+        "grounding",
+        "calibrat",
+        "provenance",
+        "AUTO_MATCHED",
+        "NEEDS_REVIEW",
+        "PAYMENT_CREDITED_AS",
+        "tuning hash",
+        "T0_EXACT",
+        "T3_FUZZY",
+    )
+
+    def test_the_first_screen_says_what_the_product_does(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "compares your payments" in markdown
+        assert "matches what it can prove" in markdown
+
+    def test_the_four_questions_are_answered_in_plain_words(
+        self, workspace, monkeypatch
+    ):
+        """How many matched, how much money, what needs me, was anything wrong."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        for label in (
+            "Matched",
+            "Amount reconciled",
+            "Needs attention",
+            "Incorrect matches",
+        ):
+            assert label in markdown
+
+    def test_no_jargon_reaches_the_overview(self, workspace, monkeypatch):
+        """The whole point. Checked against the Overview tab's own markdown so
+        the technical screens cannot accidentally satisfy it."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        for word in self.JARGON:
+            assert word not in overview, f"{word!r} reached the first screen"
+
+    def test_the_technical_vocabulary_is_still_there_one_tab_away(
+        self, workspace, monkeypatch
+    ):
+        """Nothing was deleted to make the overview clean. A redesign that
+        dropped the evidence would have traded the project's strongest property
+        for a tidier screen."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        report = " ".join(item.value for item in test.tabs[4].markdown)
+        for word in ("Precision", "Recall", "Match rate", "95% CI"):
+            assert word in report
+
+    def test_the_glossary_translates_every_term_it_shows(
+        self, workspace, monkeypatch
+    ):
+        """A technical term printed without its plain meaning is the thing the
+        redesign exists to stop."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        glossaries = [
+            frame.value
+            for frame in test.dataframe
+            if "In plain words" in list(frame.value.columns)
+        ]
+        assert glossaries, "the technical report shows no glossary"
+        table = glossaries[0]
+        assert len(table) >= 5
+        for meaning in table["In plain words"]:
+            assert str(meaning).strip()
+        for term in ("Precision", "Recall", "False positives"):
+            assert term in list(table["Term"])
+
+
+class TestSafetyIsTheHeadline:
+    """Precision-first is the project's strongest property, and the redesign
+    had to make it legible without overstating it."""
+
+    def test_the_safety_claim_is_stated_in_plain_words(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        markdown = " ".join(item.value for item in test.markdown)
+        assert "incorrect matches" in markdown
+        assert "instead of guessing" in markdown
+
+    def test_the_queue_leads_with_nothing_was_guessed(self, workspace, monkeypatch):
+        """The reassurance a controller needs before reading a list of
+        problems: this is a refusal, not a failure."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        assert "Nothing was guessed" in attention
+
+    def test_the_overview_never_calls_a_perfect_score_a_pass(
+        self, workspace, monkeypatch
+    ):
+        """`0 incorrect matches` is what was *measured*. Whether it clears a 99%
+        target at this sample size is a statistical ruling, and it stays in the
+        report with its interval where it can be read properly."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        assert "target met" not in overview
+        assert "99" not in overview
+
+    def test_the_three_destinations_stay_three_numbers(self, workspace, monkeypatch):
+        """Matched, needs attention and not matched are never added together.
+        Folding a refusal into 'matched' is the single most misleading thing a
+        reconciliation dashboard can do."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        overview = " ".join(item.value for item in test.tabs[0].markdown)
+        for label in ("Matched", "Needs attention", "Not matched"):
+            assert label in overview
+
+
+class TestTheQueueIsActionable:
+    def test_every_item_says_what_was_found_and_what_to_do(
+        self, workspace, monkeypatch
+    ):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        assert "What we found." in attention
+        assert "What to do." in attention
+
+    def test_it_leads_with_the_money(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        attention = " ".join(item.value for item in test.tabs[1].markdown)
+        assert "Money involved" in attention
+        assert "₹" in attention
+
+
+class TestWhyItMatchedExplainsItself:
+    def test_it_gives_reasons_rather_than_a_tier_name(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        why = " ".join(item.value for item in test.tabs[3].markdown)
+        assert "How it was matched." in why
+        assert "Confidence." in why
+        assert "T0_EXACT" not in why
+
+    def test_the_confidence_is_a_word_not_four_decimals(
+        self, workspace, monkeypatch
+    ):
+        """A controller does not act differently at 0.94 than at 0.96, and four
+        decimals invite a precision the calibration section is careful not to
+        claim. The exact figure stays in the expander."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        why = " ".join(item.value for item in test.tabs[3].markdown)
+        assert any(
+            phrase in why
+            for phrase in ("Very strong evidence", "Strong evidence", "Not confirmed")
+        )
+
+
+class TestTheTransactionList:
+    def test_it_can_be_filtered_and_searched(self, workspace, monkeypatch):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        keys = {widget.key for widget in test.selectbox}
+        assert "tx_status" in keys
+        assert any(widget.key == "tx_search" for widget in test.text_input)
+
+    def test_it_says_why_there_is_no_amount_column(self, workspace, monkeypatch):
+        """The run record stores no amount per matched link. Saying so is the
+        honest alternative to a column of plausible-looking blanks."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        captions = " ".join(item.value for item in test.caption)
+        assert "no amount column" in captions
 
 class TestTheRunScreen:
     def test_it_offers_the_datasets_on_disk(self, workspace, monkeypatch):

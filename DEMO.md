@@ -146,25 +146,43 @@ launching it. `--split dev` runs the 60-order corpus.
 
 ### What to look at, in order
 
-1. **Overview** — the four headline proportions as cards. Each carries its
-   sample, its 95% Wilson interval drawn to scale, and a verdict. Precision
-   reads *undecided* rather than green: 283 of 283 gives [98.66%, 100.00%], and
-   the lower bound does not clear the ≥ 99% target. That is the same ruling
-   `EVALUATION.md` prints, from the same call.
-2. **Pipeline** — the ladder as a flow. **T4 Graph shows 0 and says why**: it
-   ran, it found nothing, and the panel explains that every earlier rung matches
-   at settlement granularity so the partial assignments graph inference exists
-   to finish never arise. T5 is drawn differently again — dashed, *did not run* —
-   because a rung that never executed has no result rather than a zero.
-3. **Exceptions** — sorted by rupee impact descending. Open the largest one: it
-   carries a class, a severity, a price, an evidence chain pointing back at
-   source records, and a suggested action.
-4. **Evidence** — pick any record and follow it: source records → normalisation
-   → candidate → tier → arithmetic verification → decision.
-5. **Evaluation** — per-class recall *including the classes that score badly*
-   (`A09_SPLIT_PAYOUT` at 0.74 is the row to look at: the remaining gap is one
-   settlement whose payments do not partition uniquely across its two tranches,
-   which the system refuses rather than guesses).
+The first four screens are written for someone who has never heard of a tier or
+a Wilson interval. The fifth is where all of that lives.
+
+1. **Overview** — four numbers and about five seconds: how many payments were
+   matched, how much money that is, how many items need a person, and how many
+   matches were **wrong**. Then *where everything went* — matched, needs
+   attention, not matched, as three separate columns — and the safety line:
+   **0 incorrect matches**, because when the evidence is not strong enough
+   LedgerLoop leaves the transaction for a person instead of guessing.
+2. **Needs attention** — the queue, largest rupee amount first. Each item says
+   *what we found* and *what to do*, in the classifier's own plain English, with
+   a technical expander beside it. This is the controller's workday.
+3. **Transactions** — every decision, filterable by status and searchable by
+   reference. There is deliberately **no amount column**: the run record stores
+   no amount per matched link, and the screen says so rather than showing a
+   column of plausible blanks.
+4. **Why it matched** — pick a record and read the reasons as ticks: what the
+   stage required, and that the amounts were re-added from the original files and
+   agree. Confidence is a phrase, not four decimals. *Technical details* carries
+   the tier, the calibrated probability and the policy's reason.
+5. **Technical report** — everything a judge or an engineer wants, moved rather
+   than deleted, and opened by a glossary that translates each term:
+   - the four headline proportions with their samples, their 95% Wilson
+     intervals drawn to scale, and a verdict. **Precision reads *undecided***:
+     283 of 283 gives [98.66%, 100.00%] and the lower bound does not clear the
+     ≥ 99% target. Same ruling `EVALUATION.md` prints, from the same call.
+   - the ladder as a flow. **T4 Graph shows 0 and says why** — it ran and found
+     nothing, because every earlier rung matches at settlement granularity so the
+     partial assignments graph inference exists to finish never arise. T5 is
+     dashed and reads *did not run*: a rung that never executed has no result
+     rather than a zero.
+   - per-class recall **including the classes that score badly**
+     (`A09_SPLIT_PAYOUT` at 0.74 is the row to look at: the remaining gap is one
+     settlement whose payments do not partition uniquely across its two tranches,
+     which the system refuses rather than guesses).
+   - the full audit replay: source records → normalisation → candidate → tier →
+     arithmetic verification → decision.
 6. **Run** — reconcile any other corpus on disk, including the 300-order `test`
    split.
 
