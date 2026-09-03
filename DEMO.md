@@ -445,6 +445,7 @@ Loading it does **not** make anything live by itself, and that is deliberate:
 | path | with a key in `.env` |
 |---|---|
 | `python run.py` | deterministic. It passes `--no-llm`, so the launcher's offline promise is enforced rather than inherited |
+| `python run.py --llm` | asks the model. Reads the key from `.env`, reaches the network, and takes far longer than the second the deterministic path needs |
 | `make eval`, `ablation`, `sweep` | deterministic **by construction**. These write published numbers, and `EVALUATION.md` reproducing byte-for-byte must not depend on who has a credential |
 | the dashboard's **Your files** tab | a tick-box, off by default. Tick it and the model is called; the result says how many times |
 | `ledgerloop demo`, `ledgerloop run` | honour the key, as they always did |

@@ -670,6 +670,14 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
         "available is made to prove it does not need one.",
     )
     parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="ask for the model explicitly, and read `.env` to find a key for "
+        "it. Without this flag a credential saved in `.env` is ignored, which "
+        "is what keeps a deterministic command deterministic on a machine that "
+        "happens to have one. An exported variable is honoured either way.",
+    )
+    parser.add_argument(
         "--llm-key-env",
         default="LEDGERLOOP_LLM_API_KEY",
         help="environment variable holding a key shared by every rung of the "
@@ -857,6 +865,28 @@ def _run_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _llm_activity(run: object) -> tuple[int, int]:
+    """How many model calls were attempted, and how many the provider refused.
+
+    Summed across the three call sites. Without this a run that asked the model
+    thirty times and was turned away thirty times printed exactly what a run
+    with nothing to ask printed -- ``0 call(s)`` -- and the two are completely
+    different situations. On a flaky free tier the second one is common and the
+    reader deserves to know which they got.
+    """
+    summary = getattr(run, "llm", None)
+    if summary is None:
+        return 0, 0
+    attempted = refused = 0
+    for stage in ("narration", "adjudication", "explanation"):
+        outcome = getattr(summary, stage, None)
+        if outcome is None:
+            continue
+        attempted += int(getattr(outcome, "attempted", 0))
+        refused += int(getattr(outcome, "calls_refused", 0))
+    return attempted, refused
+
+
 def _deterministic_client() -> LLMClient:
     """A client that is off, whatever the environment holds.
 
@@ -889,6 +919,16 @@ def _client_for(args: argparse.Namespace, *, max_calls: int | None = None) -> LL
     ledger sit exactly where they were.
     """
     wanted = not args.no_llm
+    if getattr(args, "llm", False):
+        if args.no_llm:
+            raise SystemExit("--llm and --no-llm ask for opposite things")
+        # `.env` is read **here and only here** among the deterministic
+        # commands: an explicit `--llm` is the one unambiguous signal that
+        # somebody wants a model, and loading a credential on any weaker signal
+        # is what made the demo enable T5 and four tests fail on a machine that
+        # merely had the file. An exported variable still works without it.
+        load_env_file()
+        wanted = True
     config = LLMConfig(enabled=wanted)
     if max_calls is not None:
         config = config.model_copy(update={"max_calls_per_run": max_calls})
@@ -1715,11 +1755,24 @@ def _run_demo(args: argparse.Namespace) -> int:
         )
     else:
         cost = run.cost
+        attempted, refused = _llm_activity(run)
         print(
             f"      llm: {cost.llm_calls} call(s), {cost.total_tokens} tokens, "
             f"equivalent paid ₹{cost.equivalent_paid_cost_inr:.2f}. It proposed; "
             "it never decided and never did arithmetic."
         )
+        if cost.llm_calls == 0 and attempted:
+            print(
+                f"      the model was asked about {attempted} item(s) and the "
+                f"provider declined every time ({refused} refused -- rate limit "
+                "or outage). The ladder absorbed it and the deterministic result "
+                "above stands, unchanged."
+            )
+        elif cost.llm_calls == 0:
+            print(
+                "      nothing needed the model on this corpus: the rules "
+                "settled everything they could and refused the rest."
+            )
     print(f"      wrote {args.runs_dir / run.config.run_id}")
 
     # --- 4. the UI ---------------------------------------------------------

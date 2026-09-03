@@ -60,11 +60,29 @@ class TestTheCanonicalCommands:
             "--no-llm",
         ]
 
-    def test_the_launcher_is_deterministic_whatever_is_configured(self, run):
-        """`--no-llm` is not tidiness. Until `.env` was loaded this file was
-        offline by accident; a saved credential now reaches the process, and the
-        promise in the docstring has to be enforced rather than inherited."""
+    def test_the_default_is_deterministic_whatever_is_configured(self, run):
+        """`--no-llm` is not tidiness. A saved credential reaches the CLI the
+        moment `--llm` is passed, so the quiet path has to *say* it is offline
+        rather than rely on nobody having a key."""
         assert "--no-llm" in run.demo_command()
+        assert "--llm" not in run.demo_command()
+
+    def test_asking_for_the_model_swaps_the_flag(self, run):
+        command = run.demo_command(use_llm=True)
+        assert "--llm" in command
+        assert "--no-llm" not in command
+
+    def test_the_two_flags_are_never_sent_together(self, run):
+        """They ask for opposite things, and the CLI rejects the pair. The
+        launcher must not be the thing that produces it."""
+        for wanted in (True, False):
+            command = run.demo_command(use_llm=wanted)
+            assert ("--llm" in command) != ("--no-llm" in command)
+
+    def test_the_flag_is_offered_to_the_person_running_it(self, run, capsys):
+        with pytest.raises(SystemExit):
+            run.main(["--help"])
+        assert "--llm" in " ".join(capsys.readouterr().out.split())
 
     def test_the_demo_runs_headless_so_a_failure_can_be_caught(self, run):
         """``--no-ui`` is what separates 'the run failed' from 'the screen is blank'.

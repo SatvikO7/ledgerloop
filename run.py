@@ -6,9 +6,11 @@ WHAT THIS IS, AND WHAT IT IS NOT
 This is a **launcher**, not a pipeline. It runs two commands the project already
 has, in the order ``DEMO.md`` documents:
 
-1. ``python -m ledgerloop.cli demo --no-ui`` -- generate the corpora, fit the
-   calibration bundle, reconcile through the LangGraph pipeline, write the run
-   record. Deterministic, offline, no API key.
+1. ``python -m ledgerloop.cli demo --no-ui --no-llm`` -- generate the corpora,
+   fit the calibration bundle, reconcile through the LangGraph pipeline, write
+   the run record. Deterministic, offline, no API key, about a second.
+   ``python run.py --llm`` swaps that last flag for ``--llm`` and lets the model
+   see the residual instead; it reaches the network and takes far longer.
 2. ``python -m streamlit run src/ledgerloop/ui/app.py`` -- the dashboard, reading
    the run record stage 1 just wrote.
 
@@ -36,9 +38,10 @@ invoked from.
 
 NO CREDENTIALS
 --------------
-This file never reads, writes or prints ``.env``, a key, or any credential. The
-demo path is deterministic and needs none; the optional live LLM is configured
-exactly as ``DEMO.md`` describes, and the launcher is not part of it.
+This file never reads, writes or prints ``.env``, a key, or any credential --
+including under ``--llm``. All that flag does is pass ``--llm`` down to the CLI,
+which is where the key is found and used. The launcher decides *whether* a model
+is wanted; it never handles the thing that reaches one.
 """
 
 from __future__ import annotations
@@ -82,7 +85,7 @@ DEFAULT_PORT = 8501
 PORT_SEARCH_LIMIT = 20
 
 
-def demo_command() -> list[str]:
+def demo_command(*, use_llm: bool = False) -> list[str]:
     """The canonical deterministic demo, as ``DEMO.md`` documents it.
 
     Two arguments, and both are about what the launcher promises rather than
@@ -92,17 +95,22 @@ def demo_command() -> list[str]:
 
     ``--no-ui`` so a failed reconciliation cannot reach a dashboard.
 
-    ``--no-llm`` so the launcher is **deterministic and offline, always**. This
-    file has claimed that since it was written, and until `.env` was loaded it
-    was true by accident: no credential reached the process, so no ladder was
-    built. Now that a saved key does reach it, the promise has to be stated. A
-    configured model is a *capability*, not an instruction, and a reviewer
-    running this for the first time should get the fast repeatable path rather
-    than a network round trip they did not ask for. The model is one tick-box
-    away inside the dashboard, and `ledgerloop demo` without this flag still
-    honours a key.
+    ``--no-llm`` by default, so `python run.py` is **deterministic and offline**
+    and takes about a second. ``--llm`` when the caller asked for it, which reads
+    the key from `.env` and takes roughly half a minute against a live model.
+
+    Never neither: the flag is always passed, in one direction or the other, so
+    what the run did is a property of the command rather than of whether the
+    machine happened to have a credential lying around.
     """
-    return [sys.executable, "-m", "ledgerloop.cli", "demo", "--no-ui", "--no-llm"]
+    return [
+        sys.executable,
+        "-m",
+        "ledgerloop.cli",
+        "demo",
+        "--no-ui",
+        "--llm" if use_llm else "--no-llm",
+    ]
 
 
 def streamlit_command(*, port: int = DEFAULT_PORT, headless: bool = False) -> list[str]:
@@ -223,6 +231,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="use the AI assistant on anything the deterministic rules could "
+        "not settle, reading the key from your `.env`. Off by default: the "
+        "rules alone take about a second, a model adds a network round trip. "
+        "Whatever it proposes is still re-checked against the source files.",
+    )
+    parser.add_argument(
         "--no-browser",
         action="store_true",
         help="start the dashboard without opening a browser tab, and print the "
@@ -269,8 +285,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"        The documented setup is:  {INSTALL_HINT}")
         print()
 
-    command = demo_command()
+    command = demo_command(use_llm=args.llm)
     print("[1/2] reconciling")
+    if args.llm:
+        print("      with the AI assistant -- this reaches the network and is slower")
     print(f"      {' '.join(command)}")
     print()
     # Flushed before every child starts. Python block-buffers stdout when it is

@@ -200,6 +200,56 @@ class TestPublishedNumbersStayDeterministic:
         assert "load_env_file()" in source[start:end]
 
 
+class TestAZeroCallRunExplainsItself:
+    """`0 call(s)` meant two completely different things and looked identical.
+
+    A run with nothing to ask the model and a run that asked a hundred times and
+    was turned away by a rate limit both printed `llm: 0 call(s)`. On a flaky
+    free tier the second is common, and a reader who cannot tell them apart
+    reasonably concludes the model is not wired up at all.
+    """
+
+    @staticmethod
+    def _run(attempted: int, refused: int):
+        from types import SimpleNamespace
+
+        stage = SimpleNamespace(attempted=attempted, calls_refused=refused)
+        return SimpleNamespace(
+            llm=SimpleNamespace(
+                narration=stage,
+                adjudication=SimpleNamespace(attempted=0, calls_refused=0),
+                explanation=SimpleNamespace(attempted=0, calls_refused=0),
+            )
+        )
+
+    def test_it_sums_attempts_and_refusals_across_the_call_sites(self):
+        from ledgerloop.cli import _llm_activity
+
+        assert _llm_activity(self._run(103, 15)) == (103, 15)
+
+    def test_nothing_asked_reads_as_nothing_asked(self):
+        from ledgerloop.cli import _llm_activity
+
+        assert _llm_activity(self._run(0, 0)) == (0, 0)
+
+    def test_a_run_without_an_llm_summary_is_not_an_error(self):
+        from types import SimpleNamespace
+
+        from ledgerloop.cli import _llm_activity
+
+        assert _llm_activity(SimpleNamespace()) == (0, 0)
+
+    def test_the_demo_distinguishes_the_two_zeroes(self):
+        import pathlib
+
+        source = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "src" / "ledgerloop" / "cli.py"
+        ).read_text(encoding="utf-8")
+        assert "provider declined every time" in source
+        assert "nothing needed the model on this corpus" in source
+
+
 class TestTheUiReportsWhatHappened:
     def test_a_disabled_client_is_reported_as_unused(self):
         from ledgerloop.config import LLMConfig
