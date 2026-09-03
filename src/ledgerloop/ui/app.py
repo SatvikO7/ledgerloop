@@ -558,6 +558,37 @@ def _kpi_card(kpi: Kpi) -> str:
     )
 
 
+#: Why a rung that ran found nothing, per rung. A zero explained by the wrong
+#: reason is worse than an unexplained one.
+_SILENT_REASON: dict[str, str] = {
+    "T4_GRAPH": (
+        "That is a measurement, not an error and not a missing component. Every "
+        "earlier rung matches at settlement granularity -- it establishes the "
+        "settlement-to-credit edge and expands the whole batch at once -- so the "
+        "*partial* assignments graph inference exists to finish never arise. "
+        "Loosening a rule until it fired would trade precision for the "
+        "appearance of contribution."
+    ),
+    "T5_LLM": (
+        "It is only ever offered **the settlements the ladder could not credit** "
+        "-- not the review queue as a whole. Almost everything in that queue is a "
+        "*finding* rather than a missing link: a payout the bank posted twice, a "
+        "chargeback whose money never arrived, a record nothing in the three "
+        "files could resolve. There is no link for a model to find in any of "
+        "those, and the right answer to a duplicate credit is to raise it with "
+        "the bank, not to reason about it. So a zero here usually means the "
+        "residual it *can* work on was empty or tiny -- and when it is not, a "
+        "proposal still has to survive the grounding check and `verify_"
+        "arithmetic` before it counts."
+    ),
+}
+
+_SILENT_DEFAULT = (
+    "That is a measurement rather than an error: the rung ran and found nothing "
+    "it could assert."
+)
+
+
 def _rung_card(stage: TierStage) -> str:
     """One rung of the ladder.
 
@@ -781,19 +812,17 @@ def screen_pipeline(run: StoredRun) -> None:
         "is the review queue a finance team has to staff."
     )
 
+    # One reason per rung, not one reason for all of them.
+    #
+    # This used to print T4's argument -- "partial assignments never arise" --
+    # over whichever rungs happened to be silent, T5 included. That is a true
+    # sentence about graph inference and a false one about the model, and a
+    # panel that explains a zero with the wrong reason is worse than one that
+    # says nothing: it invites a reader to distrust the rungs that *did* fire.
     silent = [stage for stage in stages if stage.ran and not stage.contributed]
-    if silent:
-        st.info(
-            "**"
-            + ", ".join(stage.label for stage in silent)
-            + " ran and contributed nothing on this corpus.** That is a"
-            " measurement, not an error and not a missing component. Every"
-            " earlier rung matches at settlement granularity -- it establishes"
-            " the settlement-to-credit edge and expands the whole batch at once"
-            " -- so the *partial* assignments graph inference exists to finish"
-            " never arise. Loosening a rule until it fired would trade precision"
-            " for the appearance of contribution."
-        )
+    for stage in silent:
+        st.info(f"**{stage.label} ran and contributed nothing on this corpus.** "
+                + _SILENT_REASON.get(stage.tier, _SILENT_DEFAULT))
 
     st.divider()
     st.subheader("Residual passes")

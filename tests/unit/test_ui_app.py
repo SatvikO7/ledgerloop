@@ -292,6 +292,30 @@ class TestThePipelineScreen:
         for label in ("Exact", "Tolerance", "Aggregation", "Lexical", "Graph", "LLM"):
             assert label in markdown
 
+    def test_each_silent_rung_gets_its_own_reason(self, workspace, monkeypatch):
+        """T4 and T5 are silent for completely different reasons, and the panel
+        used to print T4's argument over both. A zero explained by the wrong
+        reason invites a reader to distrust the rungs that did fire."""
+        from ledgerloop.ui.app import _SILENT_REASON
+
+        assert set(_SILENT_REASON) == {"T4_GRAPH", "T5_LLM"}
+        graph, llm = _SILENT_REASON["T4_GRAPH"], _SILENT_REASON["T5_LLM"]
+        assert "partial" in graph and "partial" not in llm
+        assert "settlements the ladder could not credit" in llm
+        assert graph != llm
+
+    def test_the_llm_reason_says_what_it_is_actually_offered(
+        self, workspace, monkeypatch
+    ):
+        """The measured fact behind it: on `test-standard-42` the adjudicator is
+        offered one evidence pack, because 66 of the 67 queue items are findings
+        rather than missing links."""
+        from ledgerloop.ui.app import _SILENT_REASON
+
+        text = _SILENT_REASON["T5_LLM"].lower()
+        assert "not the review queue as a whole" in text
+        assert "posted twice" in text or "chargeback" in text
+
     def test_a_rung_that_found_nothing_says_so_honestly(self, workspace, monkeypatch):
         """T4 runs on every corpus and contributes zero. The dashboard has to
         say that plainly -- not as an error, and not by hiding the rung."""
