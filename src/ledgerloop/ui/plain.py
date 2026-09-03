@@ -38,7 +38,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ledgerloop.agent.store import StoredRun
+from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, Tier
+from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.money import format_minor
 from ledgerloop.ui.views import Headline, headline
 
@@ -56,17 +58,20 @@ __all__ = [
     "Status",
     "assistant_activity",
     "attention_items",
+    "attention_items_from",
     "buckets",
     "confidence_word",
     "glossary",
     "journey",
     "match_story",
+    "match_story_from",
     "report_labels",
     "safety_note",
     "snapshot",
     "stage_of",
     "status_of",
     "transaction_rows",
+    "transaction_rows_from",
 ]
 
 
@@ -455,21 +460,16 @@ class AttentionItem:
     agent_may_resolve: bool
 
 
-def attention_items(run: StoredRun) -> list[AttentionItem]:
-    """The review queue, biggest rupee impact first.
+def attention_items_from(
+    exceptions: Sequence[ReconException],
+) -> list[AttentionItem]:
+    """The queue, from the exceptions themselves.
 
-    Sorted by money for the same reason ``views.exception_rows`` is: one large
-    payout matters more than two hundred one-paise drifts, and any other order
-    buries that.
-
-    ``found`` and ``action`` are the classifier's own sentences. They are already
-    plain English and grounded in the evidence chain, so they are passed through
-    untouched rather than paraphrased -- a paraphrase here would be this module
-    inventing a claim the run did not make.
+    Split out from :func:`attention_items` so uploaded files -- which produce
+    exceptions but no stored run -- go through exactly this code and not a
+    second copy of it.
     """
-    items = sorted(
-        run.exceptions, key=lambda item: (-item.impact_minor, item.exception_id)
-    )
+    items = sorted(exceptions, key=lambda item: (-item.impact_minor, item.exception_id))
     return [
         AttentionItem(
             amount=format_minor(item.impact_minor),
@@ -485,6 +485,21 @@ def attention_items(run: StoredRun) -> list[AttentionItem]:
         )
         for item in items
     ]
+
+
+def attention_items(run: StoredRun) -> list[AttentionItem]:
+    """The review queue, biggest rupee impact first.
+
+    Sorted by money for the same reason ``views.exception_rows`` is: one large
+    payout matters more than two hundred one-paise drifts, and any other order
+    buries that.
+
+    ``found`` and ``action`` are the classifier's own sentences. They are already
+    plain English and grounded in the evidence chain, so they are passed through
+    untouched rather than paraphrased -- a paraphrase here would be this module
+    inventing a claim the run did not make.
+    """
+    return attention_items_from(run.exceptions)
 
 
 def confidence_word(probability: float, *, verified: bool) -> str:
@@ -516,20 +531,16 @@ _OUTCOME_PLAIN: dict[str, tuple[str, str]] = {
 }
 
 
-def transaction_rows(run: StoredRun, *, status: str | None = None) -> list[dict[str, object]]:
-    """Every decision the run committed, as a table a person can scan.
+def transaction_rows_from(
+    decisions: Sequence[MatchDecision], *, status: str | None = None
+) -> list[dict[str, object]]:
+    """Every decision as a scannable row, from the decisions themselves.
 
-    Columns are what the run actually holds. There is **no amount and no
-    merchant column**, because the run store keeps neither per decision -- see
-    the module docstring. The money lives on the overview and on the review
-    queue, where the figures are real.
-
-    ``status`` filters by the plain label. Filtering narrows what is shown and
-    nothing else; the overview's counts are read from the run's own summary and
-    cannot be moved by it.
+    Uploaded files produce decisions without a stored run, and they deserve the
+    same table rather than a second one written for them.
     """
     rows: list[dict[str, object]] = []
-    for decision in run.decisions:
+    for decision in decisions:
         label, tone = _OUTCOME_PLAIN.get(decision.outcome.value, ("Recorded", "muted"))
         if status is not None and label != status:
             continue
@@ -550,6 +561,21 @@ def transaction_rows(run: StoredRun, *, status: str | None = None) -> list[dict[
             }
         )
     return rows
+
+
+def transaction_rows(run: StoredRun, *, status: str | None = None) -> list[dict[str, object]]:
+    """Every decision the run committed, as a table a person can scan.
+
+    Columns are what the run actually holds. There is **no amount and no
+    merchant column**, because the run store keeps neither per decision -- see
+    the module docstring. The money lives on the overview and on the review
+    queue, where the figures are real.
+
+    ``status`` filters by the plain label. Filtering narrows what is shown and
+    nothing else; the overview's counts are read from the run's own summary and
+    cannot be moved by it.
+    """
+    return transaction_rows_from(run.decisions, status=status)
 
 
 def transaction_search(rows: list[dict[str, object]], query: str) -> list[dict[str, object]]:
@@ -602,27 +628,28 @@ class MatchStory:
     """Label/value pairs for the expander. The jargon lives here and only here."""
 
 
-def match_story(run: StoredRun, record_key: str) -> MatchStory:
-    """The plain-English account of one record.
+def match_story_from(
+    decisions: Sequence[MatchDecision],
+    exceptions: Sequence[ReconException],
+    record_key: str,
+) -> MatchStory:
+    """The plain account of one record, from decisions and exceptions.
 
-    Assembled by *selecting* from the stored decisions and the stored exceptions
-    -- the same discipline ``views.trace_record`` follows. The reasons are the
-    stage's own rule plus two facts the decision itself records: whether the
-    arithmetic closed against the source documents, and how confident the
-    calibrated model was. Nothing is inferred about the record beyond what it
-    stored.
+    ``decisions`` must already be the ones naming ``record_key``; the caller
+    knows how to select them and a stored run and an uploaded result select them
+    differently. Everything after that selection is identical, which is why this
+    is one function rather than two.
     """
-    decisions = run.decisions_for(record_key)
-    exceptions = [
+    naming = [
         item
-        for item in run.exceptions
+        for item in exceptions
         if any(ref.key == record_key for ref in item.involved_refs)
     ]
 
     if not decisions:
         cause = (
-            exceptions[0].root_cause
-            if exceptions
+            naming[0].root_cause
+            if naming
             else (
                 "No stage found evidence strong enough to link this record, and "
                 "nothing was guessed. It may also be one of the records that "
@@ -638,10 +665,12 @@ def match_story(run: StoredRun, record_key: str) -> MatchStory:
             reasons=(cause,),
             confidence="",
             caveat="",
-            technical=(("Decisions recorded", "0"), ("Exceptions naming it", str(len(exceptions)))),
+            technical=(
+                ("Decisions recorded", "0"),
+                ("Exceptions naming it", str(len(naming))),
+            ),
         )
 
-    # Append-only log: the decision that stands is the last one.
     decision = decisions[-1]
     stage = stage_of(decision.tier)
     committed = decision.outcome is DecisionOutcome.AUTO_MATCHED
@@ -690,6 +719,21 @@ def match_story(run: StoredRun, record_key: str) -> MatchStory:
             ("Policy reason", decision.reason),
             ("Decision id", decision.decision_id),
         ),
+    )
+
+
+def match_story(run: StoredRun, record_key: str) -> MatchStory:
+    """The plain-English account of one record.
+
+    Assembled by *selecting* from the stored decisions and the stored exceptions
+    -- the same discipline ``views.trace_record`` follows. The reasons are the
+    stage's own rule plus two facts the decision itself records: whether the
+    arithmetic closed against the source documents, and how confident the
+    calibrated model was. Nothing is inferred about the record beyond what it
+    stored.
+    """
+    return match_story_from(
+        run.decisions_for(record_key), run.exceptions, record_key
     )
 
 

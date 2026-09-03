@@ -101,11 +101,13 @@ from ledgerloop.ui.plain import (
     glossary,
     journey,
     match_story,
+    match_story_from,
     report_labels,
     safety_note,
     snapshot,
     status_of,
     transaction_rows,
+    transaction_rows_from,
     transaction_search,
 )
 from ledgerloop.ui.uploads import (
@@ -2038,6 +2040,74 @@ def _upload_results(result: ReconcileResult) -> None:
                 f"Showing the 10 largest of {len(result.exceptions)}."
             )
 
+    st.divider()
+    st.subheader("Every decision on your files")
+    rows = transaction_rows_from(result.matched.decisions)
+    if rows:
+        statuses = sorted({str(row["Status"]) for row in rows})
+        options = ["All", *statuses]
+        columns = st.columns([1, 2])
+        chosen = _picked(columns[0].selectbox("Status", options, key="up_status"), options)
+        query = columns[1].text_input(
+            "Search",
+            placeholder="Payment or bank reference",
+            key="up_search",
+        )
+        shown = transaction_rows_from(
+            result.matched.decisions, status=None if chosen == "All" else chosen
+        )
+        shown = transaction_search(shown, query or "")
+        st.caption(f"Showing {len(shown):,} of {len(rows):,}.")
+        st.dataframe(
+            [
+                {
+                    key: row[key]
+                    for key in (
+                        "Status",
+                        "Payment",
+                        "Bank transaction",
+                        "How it was matched",
+                        "Confidence",
+                    )
+                }
+                for row in shown
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.divider()
+        st.subheader("Why one of them matched")
+        keys = [str(row["record_key"]) for row in rows]
+        picked = _picked(st.selectbox("Record", keys, key="up_why"), keys)
+        story = match_story_from(
+            [d for d in result.matched.decisions if picked in
+             (d.source_ref.key, d.target_ref.key)],
+            result.exceptions,
+            picked,
+        )
+        if story.matched:
+            st.success(f"{_TICK} {story.headline}")
+        else:
+            st.warning(f"{_WARN} {story.headline}")
+        if story.partner:
+            st.markdown(f"**{picked}** to **{story.partner}**")
+        if story.stage:
+            st.markdown(f"**How it was matched.** {story.stage}")
+        st.markdown("**Why:**")
+        st.markdown(
+            '<ul class="ll-reasons">'
+            + "".join(f"<li>{_esc(reason)}</li>" for reason in story.reasons)
+            + "</ul>",
+            unsafe_allow_html=True,
+        )
+        if story.confidence:
+            st.markdown(f"**Confidence.** {story.confidence}")
+        with st.expander("Technical details"):
+            st.write(dict(story.technical))
+    else:
+        st.caption("No links were committed, so there is nothing to list.")
+
     with st.expander("Advanced reconciliation details"):
         st.write(
             {
@@ -2249,6 +2319,12 @@ def main() -> None:
         screen_why,
         screen_report,
     )
+    # The notice exists because the layout invites a wrong conclusion. A person
+    # uploads their files, reads a result on the first tab, clicks the second,
+    # and sees an unrelated bundled corpus with no indication that the subject
+    # changed. Three different datasets, no signposting. Saying so on every one
+    # of these screens is the least the interface owes them.
+    uploaded = st.session_state.get("upload_result") is not None
     for tab, screen in zip(tabs[1:6], screens, strict=True):
         with tab:
             if selected is None:
@@ -2256,8 +2332,18 @@ def main() -> None:
                     "These screens describe a finished report. Upload your files "
                     "on **Your files**, or create a sample one on **Sample data**."
                 )
-            else:
-                screen(selected)
+                continue
+            if uploaded:
+                st.warning(
+                    f"**This is the sample report "
+                    f"'{labels.get(selected.run_id, selected.run_id)}', not your "
+                    "uploaded files.** Your result -- and everything LedgerLoop "
+                    "could work out from it -- is on **Your files**. These "
+                    "screens quote precision and recall, which are scored "
+                    "against a hand-checked answer key that only the bundled "
+                    "samples have."
+                )
+            screen(selected)
     with tabs[6]:
         screen_run()
 

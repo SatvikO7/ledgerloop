@@ -407,3 +407,108 @@ class TestUploadsAreTreatedAsUntrusted:
         with tempfile.TemporaryDirectory(prefix="ledgerloop-upload-") as created:
             assert Path(created).resolve() != FIXTURE.resolve()
             assert "data" not in Path(created).parts[-1]
+
+
+class TestUploadedDataIsSelfContained:
+    """The bug this closes: three datasets on screen with no signposting.
+
+    "Your files" showed the upload, Overview showed a bundled sample, Needs
+    review showed the same sample -- and nothing said the subject had changed.
+    Anyone would read the second screen as describing the files they had just
+    handed over.
+
+    The fix is in two halves. Everything derivable from an upload *without* an
+    answer key now lives on the upload screen, and every screen that cannot show
+    it says so.
+    """
+
+    def test_the_queue_shaper_works_without_a_stored_run(self, tmp_path):
+        from ledgerloop.ui.plain import attention_items_from
+
+        result = reconcile_only(
+            _dir_with(tmp_path, SourceKind.PROCESSOR, SourceKind.BANK)
+        )
+        items = attention_items_from(result.exceptions)
+        assert len(items) == len(result.exceptions)
+        for item in items:
+            assert item.found.strip() and item.action.strip()
+
+    def test_the_transaction_table_works_without_a_stored_run(self, tmp_path):
+        from ledgerloop.ui.plain import transaction_rows_from
+
+        result = reconcile_only(
+            _dir_with(tmp_path, SourceKind.PROCESSOR, SourceKind.BANK)
+        )
+        rows = transaction_rows_from(result.matched.decisions)
+        assert rows
+        assert len(rows) == len(result.matched.decisions)
+        for row in rows:
+            assert row["Status"] and row["How it was matched"]
+
+    def test_why_it_matched_works_without_a_stored_run(self, tmp_path):
+        from ledgerloop.ui.plain import match_story_from, transaction_rows_from
+
+        result = reconcile_only(
+            _dir_with(tmp_path, SourceKind.PROCESSOR, SourceKind.BANK)
+        )
+        rows = transaction_rows_from(result.matched.decisions, status="Matched")
+        assert rows
+        key = str(rows[0]["record_key"])
+        story = match_story_from(
+            [
+                d
+                for d in result.matched.decisions
+                if key in (d.source_ref.key, d.target_ref.key)
+            ],
+            result.exceptions,
+            key,
+        )
+        assert story.matched
+        assert story.partner and story.partner not in key
+        assert story.reasons
+
+    def test_the_shapers_agree_with_the_stored_run_versions(self, tmp_path):
+        """Two entry points, one implementation. If these ever disagree the
+        upload screen has quietly become a second dashboard."""
+        import inspect
+
+        from ledgerloop.ui import plain
+
+        for wrapper, worker in (
+            (plain.attention_items, plain.attention_items_from),
+            (plain.transaction_rows, plain.transaction_rows_from),
+            (plain.match_story, plain.match_story_from),
+        ):
+            body = inspect.getsource(wrapper)
+            assert worker.__name__ in body, (
+                f"{wrapper.__name__} no longer delegates to {worker.__name__}"
+            )
+
+    def test_the_upload_screen_shows_decisions_and_a_worked_example(self):
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "src" / "ledgerloop" / "ui" / "app.py"
+        ).read_text(encoding="utf-8")
+        start = source.index("def _upload_results(")
+        end = source.index(chr(10) + "def ", start + 10)
+        body = source[start:end]
+        assert "Every decision on your files" in body
+        assert "Why one of them matched" in body
+        assert "transaction_rows_from" in body
+        assert "match_story_from" in body
+
+    def test_the_sample_screens_say_they_are_not_your_files(self):
+        """The other half. A screen that cannot show the upload must not be
+        mistakable for one that does."""
+        import re
+
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "src" / "ledgerloop" / "ui" / "app.py"
+        ).read_text(encoding="utf-8")
+        # Adjacent string literals are joined, so a sentence the formatter
+        # wrapped across two source lines still reads as one sentence here.
+        joined = re.sub(r'"\s*\n\s*f?"', "", source)
+        assert "not your uploaded files" in joined
+        assert "is on **Your files**" in joined
+        assert 'st.session_state.get("upload_result") is not None' in source

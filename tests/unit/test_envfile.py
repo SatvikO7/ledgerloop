@@ -279,18 +279,25 @@ class TestTheUiReportsWhatHappened:
         # The guarantee is that no *widget* collects a credential and no code
         # path handles one. The words "no API key" appear in prose, correctly.
         assert "api_key" not in source
-        # Every free-text input in the interface, and what it is for. A widget
-        # collecting a credential would show up here as a new entry.
+        # Every free-text input in the interface has to be accounted for, and
+        # each one must be a search box. Counting them was the first version of
+        # this test and it broke the moment a second, perfectly innocent search
+        # field appeared -- the guarantee is about *what* they collect, not how
+        # many there are.
+        lines = source.splitlines()
         inputs = [
             index
-            for index, line in enumerate(source.splitlines())
+            for index, line in enumerate(lines)
             if "text_input(" in line or "text_area(" in line
         ]
-        assert len(inputs) == 1, "a new free-text input appeared; check what it collects"
-        joined = source.splitlines()[inputs[0] : inputs[0] + 5]
-        following = chr(10).join(joined).lower()
-        assert "search" in following
-        assert "key" not in following.replace("key=", "")
+        assert inputs, "the search boxes have gone missing"
+        for index in inputs:
+            following = chr(10).join(lines[index : index + 6]).lower()
+            assert "search" in following, (
+                f"a free-text input at line {index + 1} is not a search box; "
+                "check what it collects"
+            )
+            assert "key" not in following.replace("key=", "")
 
     @pytest.mark.parametrize("calls", [0, 1, 9])
     def test_used_follows_calls_made_not_a_key_existing(self, calls):
