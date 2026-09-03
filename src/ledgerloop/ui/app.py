@@ -95,6 +95,7 @@ from ledgerloop.ui.plain import (
     AttentionItem,
     Bucket,
     JourneyStep,
+    assistant_activity,
     attention_items,
     buckets,
     glossary,
@@ -1588,6 +1589,98 @@ def screen_why(run: StoredRun) -> None:
         )
 
 
+def _assistant_panel(run: StoredRun) -> None:
+    """What the AI assistant did, and what was taken off it.
+
+    Shown even when it did nothing, because "nothing" has three different
+    meanings here and a reader cannot tell them apart otherwise: no model was
+    configured, a model was configured and the provider refused every call, or a
+    model answered and every answer was thrown out by the gates. The third is
+    the system working; the first two are not failures either.
+    """
+    activity = assistant_activity(run)
+    st.subheader("What the AI assistant did")
+
+    if not activity.available:
+        st.info(
+            "**No AI model was used for this report.** Every figure above came "
+            "from the deterministic rules, and re-running it produces the same "
+            "numbers with no network and no key."
+        )
+        return
+
+    if not activity.used:
+        st.warning(
+            "**A model was configured, but no call completed.** The provider "
+            "declined every attempt -- a rate limit or an outage -- and the "
+            "ladder fell back to the deterministic result, which is exactly "
+            "what it exists to do. Nothing above depends on the model."
+        )
+        return
+
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            "",
+            "Calls made",
+            f"{activity.calls:,}",
+            f"{activity.tokens:,} tokens, about "
+            f"{_RUPEE}{activity.cost_inr:.2f} at paid-API rates",
+            "brand",
+        )
+        + _big_card(
+            _TICK,
+            "Suggestions accepted",
+            f"{activity.accepted:,}",
+            "survived every check and became candidates",
+            "good",
+        )
+        + _big_card(
+            _SHIELD,
+            "Suggestions refused",
+            f"{activity.refused:,}",
+            "thrown out before they could count",
+            "good" if activity.refused else "muted",
+        )
+        + _big_card(
+            "",
+            "Explanations reworded",
+            f"{activity.prose_rewritten:,}",
+            "wording only -- never the class or the amount",
+            "muted",
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if activity.refused:
+        st.success(
+            f"**{activity.refused} suggestion(s) were refused, and that is the "
+            "point.** "
+            + (
+                f"{activity.refused_ungrounded} cited a record that was not in "
+                "the evidence pack it was given. "
+                if activity.refused_ungrounded
+                else ""
+            )
+            + (
+                f"{activity.demoted_unverified} did not add up when the money "
+                "was re-derived from your files, and were handed to a person "
+                "rather than dropped. "
+                if activity.demoted_unverified
+                else ""
+            )
+            + "The model proposes; deterministic code decides."
+        )
+    st.caption(
+        "The assistant may read a narration the rules could not parse, suggest a "
+        "link for what is left over, and reword an explanation. It may **never** "
+        "decide a match, do arithmetic, set a confidence or classify an "
+        "exception -- and `verify_arithmetic` has no parameter for where a "
+        "proposal came from."
+    )
+
+
 def screen_report(run: StoredRun) -> None:
     """Everything a judge or an engineer needs, out of the normal user's way."""
     st.subheader("Accuracy and details")
@@ -1635,6 +1728,8 @@ def screen_report(run: StoredRun) -> None:
             "between two possibilities."
         )
 
+    st.divider()
+    _assistant_panel(run)
     st.divider()
     screen_overview(run)
     st.divider()

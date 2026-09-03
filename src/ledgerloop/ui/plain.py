@@ -46,6 +46,7 @@ __all__ = [
     "GLOSSARY",
     "REPORT_NAMES",
     "STAGES",
+    "AssistantActivity",
     "AttentionItem",
     "Bucket",
     "GlossaryEntry",
@@ -53,6 +54,7 @@ __all__ = [
     "MatchStory",
     "Snapshot",
     "Status",
+    "assistant_activity",
     "attention_items",
     "buckets",
     "confidence_word",
@@ -688,6 +690,71 @@ def match_story(run: StoredRun, record_key: str) -> MatchStory:
             ("Policy reason", decision.reason),
             ("Decision id", decision.decision_id),
         ),
+    )
+
+
+@dataclass(frozen=True)
+class AssistantActivity:
+    """What the AI assistant actually did on this run, if anything.
+
+    Every field is read off the stored run. ``used`` is **calls made**, never a
+    credential existing -- the distinction the whole gate exists to protect.
+
+    The refusal counts matter more than the acceptances, and they are the reason
+    this is worth showing at all. A model that proposes twelve links and has
+    nine of them thrown out for citing records it was never given is a model
+    being held to something; a dashboard that showed only the three would be
+    describing a different system.
+    """
+
+    available: bool
+    """Whether a model was wired up for this run at all."""
+
+    calls: int
+    tokens: int
+    cost_inr: float
+    cache_hits: int
+    accepted: int
+    """Proposals that survived every gate and became candidates."""
+
+    refused_ungrounded: int
+    """Thrown out for citing a record that was not in the evidence pack."""
+
+    demoted_unverified: int
+    """The money did not close under ``verify_arithmetic``. Demoted, not
+    dropped: it becomes a candidate for a person, because "the model suggested
+    this and the arithmetic disagrees" is information a controller wants."""
+
+    prose_rewritten: int
+    """Exception explanations reworded. The class, the severity and the rupee
+    figure were already decided and are never sent back for revision."""
+
+    @property
+    def used(self) -> bool:
+        return self.calls > 0
+
+    @property
+    def refused(self) -> int:
+        return self.refused_ungrounded + self.demoted_unverified
+
+    @property
+    def did_anything_visible(self) -> bool:
+        return bool(self.accepted or self.refused or self.prose_rewritten)
+
+
+def assistant_activity(run: StoredRun) -> AssistantActivity:
+    """Read the model's contribution off the run record. Nothing recomputed."""
+    llm = run.summary.get("llm", {})
+    return AssistantActivity(
+        available=bool(llm.get("available", False)),
+        calls=int(llm.get("calls", 0)),
+        tokens=int(llm.get("total_tokens", 0)),
+        cost_inr=float(llm.get("equivalent_paid_cost_inr", 0.0)),
+        cache_hits=int(llm.get("cache_hits", 0)),
+        accepted=int(llm.get("accepted", 0)),
+        refused_ungrounded=int(llm.get("rejected_ungrounded", 0)),
+        demoted_unverified=int(llm.get("rejected_unverified", 0)),
+        prose_rewritten=int(llm.get("prose_rewritten", 0)),
     )
 
 

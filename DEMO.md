@@ -434,6 +434,47 @@ Responses are content-hash cached, so a second identical run makes **zero** live
 calls. The cache key is stable across a failover, so a transient rate limit
 cannot turn into a permanent extra cost.
 
+### Showing the model working, on a free tier
+
+A free Gemini key rate-limits after a handful of calls. Measured, ten attempts in
+a row: `503, OK, OK, OK, 503, 503, 429, 429, 429, 429`. So a run over the
+300-order `test` split asks about ~103 items, exhausts the quota, and every call
+fails -- the ladder absorbs it and you see `0 call(s)`, which looks exactly like
+a model that was never wired up.
+
+**Use the 60-order corpus instead.** It needs about three calls and fits inside
+the quota:
+
+```bash
+python -m ledgerloop.cli demo --llm --split dev --no-ui
+```
+
+A real run of that, measured:
+
+```
+llm: 3 call(s), 1957 tokens, equivalent paid ₹1.18
+      accepted 3 · refused by the grounding gate 2 · explanations reworded 3
+```
+
+Then open the dashboard, pick **Demo report** in the sidebar, and go to
+**Accuracy & details → What the AI assistant did**. The panel shows the calls,
+what was accepted, and -- the part worth pausing on -- **what was refused**:
+
+> **2 suggestion(s) were refused, and that is the point.** 2 cited a record that
+> was not in the evidence pack it was given. The model proposes; deterministic
+> code decides.
+
+That is a stronger thing to show than a model finding a match. Anyone can demo an
+LLM producing output; this demos one being *held to something*.
+
+Two honest caveats to say out loud rather than hide. The `dev` split's recall is
+0.66 against `test`'s 0.96 -- it is 59 links, and the headline numbers come from
+`test`. And on `test` the assistant is offered exactly **one** settlement to work
+on, because 66 of that corpus's 67 queue items are findings rather than missing
+links: a payout the bank posted twice, a chargeback whose money never arrived, a
+record nothing in the three files could resolve. There is no link for a model to
+find in any of those.
+
 ### Turning the model on
 
 `.env` is now **loaded**. Until this increment nothing opened it, so a key saved

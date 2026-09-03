@@ -397,3 +397,66 @@ class TestTheJourney:
             for word in ("tier", "T0", "lexical", "residual", "calibrat"):
                 assert word not in step.label
                 assert word not in step.note
+
+
+class TestTheAssistantActivity:
+    """What the model did, read off the run and never inferred.
+
+    `0 calls` had three different meanings and the dashboard showed none of
+    them: no model configured, a model configured whose provider refused, and a
+    model that answered and had every answer thrown out. Only the third is the
+    system working, and it was invisible.
+    """
+
+    def test_a_deterministic_run_reports_no_model(self, stored):
+        activity = plain.assistant_activity(stored)
+        assert activity.available is False
+        assert activity.used is False
+
+    def test_used_follows_calls_not_availability(self, stored, tmp_path):
+        """The claim the gate exists to prevent: a configured model that never
+        answered must not read as "the model ran"."""
+        copied = tmp_path / "runs" / stored.directory.name
+        copied.mkdir(parents=True)
+        for source in stored.directory.iterdir():
+            shutil.copy2(source, copied / source.name)
+        summary = json.loads((copied / "run.json").read_text(encoding="utf-8"))
+        summary["llm"] = {"available": True, "calls": 0}
+        (copied / "run.json").write_text(json.dumps(summary), encoding="utf-8")
+
+        activity = plain.assistant_activity(list_runs(copied.parent)[0])
+        assert activity.available is True
+        assert activity.used is False
+
+    def test_it_reads_every_gate_counter(self, stored, tmp_path):
+        copied = tmp_path / "runs" / stored.directory.name
+        copied.mkdir(parents=True)
+        for source in stored.directory.iterdir():
+            shutil.copy2(source, copied / source.name)
+        summary = json.loads((copied / "run.json").read_text(encoding="utf-8"))
+        summary["llm"] = {
+            "available": True,
+            "calls": 9,
+            "total_tokens": 13097,
+            "equivalent_paid_cost_inr": 8.81,
+            "accepted": 0,
+            "rejected_ungrounded": 9,
+            "rejected_unverified": 0,
+            "prose_rewritten": 20,
+        }
+        (copied / "run.json").write_text(json.dumps(summary), encoding="utf-8")
+
+        activity = plain.assistant_activity(list_runs(copied.parent)[0])
+        assert activity.used is True
+        assert activity.calls == 9
+        assert activity.refused == 9
+        assert activity.prose_rewritten == 20
+        assert activity.did_anything_visible is True
+
+    def test_refused_sums_both_gates(self):
+        activity = plain.AssistantActivity(
+            available=True, calls=5, tokens=0, cost_inr=0.0, cache_hits=0,
+            accepted=1, refused_ungrounded=3, demoted_unverified=2,
+            prose_rewritten=0,
+        )
+        assert activity.refused == 5

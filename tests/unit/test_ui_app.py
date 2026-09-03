@@ -510,6 +510,17 @@ class TestItReadsWithoutJargon:
         for word in ("Precision", "Recall", "Match rate", "95% CI"):
             assert word in report
 
+    def test_the_report_says_what_the_assistant_did(self, workspace, monkeypatch):
+        """Even when it did nothing. `0 calls` meant three different things and
+        the dashboard showed none of them."""
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        details = _tab(test, "Accuracy & details")
+        headings = " ".join(item.value for item in details.subheader)
+        assert "What the AI assistant did" in headings
+        messages = [item.value for item in test.info]
+        assert any("No AI model was used for this report" in m for m in messages)
+
     def test_the_glossary_translates_every_term_it_shows(
         self, workspace, monkeypatch
     ):
