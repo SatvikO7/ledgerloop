@@ -335,8 +335,21 @@ def _parse_all(rows: Sequence[Any], model: Any) -> tuple[Any, ...]:
     return tuple(parsed)
 
 
+def _written_at(directory: Path) -> float:
+    """When this run was last written, from the **files** rather than the folder.
+
+    A directory's mtime moves when an entry is created or removed, not when one
+    is rewritten. Re-running an id that already exists overwrites the same four
+    filenames, so the folder's own timestamp stays at whenever the id was *first*
+    used -- on this machine a freshly written run sorted below one from eight
+    hours earlier, and the dashboard opened on a stale report.
+    """
+    times = [item.stat().st_mtime for item in directory.iterdir() if item.is_file()]
+    return max(times, default=directory.stat().st_mtime)
+
+
 def list_runs(root: Path = RUNS_ROOT) -> tuple[StoredRun, ...]:
-    """Every readable run under ``root``, newest first by directory mtime."""
+    """Every readable run under ``root``, newest first by when it was written."""
     if not root.is_dir():
         return ()
     found = []
@@ -345,5 +358,9 @@ def list_runs(root: Path = RUNS_ROOT) -> tuple[StoredRun, ...]:
             continue
         stored = load_run(directory)
         if stored is not None:
-            found.append((directory.stat().st_mtime, stored))
-    return tuple(run for _, run in sorted(found, key=lambda item: -item[0]))
+            found.append((_written_at(directory), stored))
+    # Ties broken by run id so two runs written in the same clock tick keep a
+    # stable order between reloads rather than shuffling under the reader.
+    return tuple(
+        run for _, run in sorted(found, key=lambda item: (-item[0], item[1].run_id))
+    )

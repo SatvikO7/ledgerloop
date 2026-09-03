@@ -375,3 +375,57 @@ class TestFailureAndResume:
         assert calls["ingest"] == 1, "ingest was re-run; the checkpoint was not used"
         assert snapshot is not None
         assert recovered.error is None or "transient" not in (recovered.error or "")
+
+
+class TestRunsAreListedNewestFirst:
+    """A re-run must sort above an older one, and it did not.
+
+    A directory's mtime moves when an entry is created or removed, not when one
+    is rewritten. Re-running an id that already exists overwrites the same four
+    filenames, so the folder's timestamp stayed at whenever the id was *first*
+    used. On a real store a run written at 14:39 sorted below one from 06:53,
+    and the dashboard opened on a stale report.
+    """
+
+    @staticmethod
+    def _run_dir(root, name, *, written_at):
+        import json
+        import os
+
+        directory = root / name
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "run.json").write_text(
+            json.dumps({"run_id": name, "metrics": {}, "dataset": {}}), encoding="utf-8"
+        )
+        for extra in ("audit.jsonl", "exceptions.json", "decisions.json"):
+            (directory / extra).write_text("[]", encoding="utf-8")
+        for item in directory.iterdir():
+            os.utime(item, (written_at, written_at))
+        return directory
+
+    def test_a_rewritten_run_sorts_above_an_older_one(self, tmp_path):
+        from ledgerloop.agent.store import list_runs
+
+        root = tmp_path / "runs"
+        old = self._run_dir(root, "older", written_at=1_000_000)
+        new = self._run_dir(root, "newer", written_at=2_000_000)
+        # The folder timestamps deliberately disagree with the file timestamps,
+        # which is exactly the situation a re-run produces.
+        import os
+
+        os.utime(new, (1_000, 1_000))
+        os.utime(old, (9_000_000, 9_000_000))
+
+        listed = [run.run_id for run in list_runs(root)]
+        assert listed[0] == "newer", listed
+
+    def test_the_order_is_stable_between_reloads(self, tmp_path):
+        """Two runs written in the same tick must not shuffle under the reader."""
+        from ledgerloop.agent.store import list_runs
+
+        root = tmp_path / "runs"
+        for name in ("beta", "alpha"):
+            self._run_dir(root, name, written_at=5_000_000)
+        first = [run.run_id for run in list_runs(root)]
+        assert first == [run.run_id for run in list_runs(root)]
+        assert first == ["alpha", "beta"]
