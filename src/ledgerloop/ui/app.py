@@ -73,7 +73,7 @@ from __future__ import annotations
 import html
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar, cast
 
@@ -88,8 +88,10 @@ from ledgerloop.generator import generate_to_disk
 from ledgerloop.ingest.problems import IngestError
 from ledgerloop.llm.client import LLMClient
 from ledgerloop.llm.providers import build_ladder
+from ledgerloop.models.decisions import MatchDecision
 from ledgerloop.models.enums import DecisionOutcome, Difficulty, SplitName
 from ledgerloop.models.metrics import Verdict
+from ledgerloop.models.recon_exception import ReconException
 from ledgerloop.money import format_minor
 from ledgerloop.ui.plain import (
     AttentionItem,
@@ -97,10 +99,10 @@ from ledgerloop.ui.plain import (
     JourneyStep,
     assistant_activity,
     attention_items,
+    attention_items_from,
     buckets,
     glossary,
     journey,
-    match_story,
     match_story_from,
     report_labels,
     safety_note,
@@ -116,6 +118,8 @@ from ledgerloop.ui.uploads import (
     assess,
     detect,
     row_count,
+    upload_snapshot,
+    upload_tier_stages,
     validate,
 )
 from ledgerloop.ui.views import (
@@ -626,10 +630,18 @@ def _rung_card(stage: TierStage) -> str:
     )
 
 
-def _hero(run: StoredRun | None) -> None:
-    """The masthead: what this is, and which run is on screen."""
+def _hero(run: StoredRun | None, *, chip: str | None = None) -> None:
+    """The masthead: what this is, and which run is on screen.
+
+    ``chip`` overrides the provenance line, for a subject that is not a stored
+    run. The chip must never describe a different subject from the one on the
+    tabs -- a masthead reading "no AI model used" over an upload that called one
+    is the same lie in the other direction.
+    """
     chips = ""
-    if run is not None:
+    if chip is not None:
+        chips = f'<div class="ll-chips"><span class="ll-chip">{_esc(chip)}</span></div>'
+    elif run is not None:
         llm = run.summary.get("llm", {})
         # ONE chip, and it is about provenance rather than identity.
         #
@@ -655,7 +667,7 @@ def _hero(run: StoredRun | None) -> None:
         ) + "</div>"
     st.markdown(
         '<div class="ll-hero"><h1>LedgerLoop</h1>'
-        "<p>Automatic payment reconciliation &mdash; it compares your payments, "
+        "<p>Automatic payment reconciliation — it compares your payments, "
         "your bank transactions and your settlement records, and only matches "
         "what it can prove.</p>"
         f"{chips}</div>",
@@ -1180,6 +1192,7 @@ _WARN = "⚠"
 _RING = "○"
 _SHIELD = "\U0001f6e1"
 _RUPEE = "₹"
+_FOLDER = "📁"
 
 
 def _big_card(
@@ -1422,11 +1435,21 @@ def _attention_card(item: AttentionItem) -> None:
 _CARD_LIMIT = 40
 
 
-def screen_attention(run: StoredRun) -> None:
-    """The review queue, led by money and written in plain English."""
-    items = attention_items(run)
+def _attention_body(
+    items: list[AttentionItem],
+    *,
+    key_prefix: str,
+    empty: str,
+    table: Callable[[], None] | None = None,
+) -> None:
+    """The queue, drawn once for both a stored report and an upload.
+
+    ``key_prefix`` keeps the two filter widgets apart -- Streamlit derives a
+    widget id from its label and options, and two identically-labelled
+    selectboxes on one run collide.
+    """
     if not items:
-        st.success("Nothing needs your attention in this run.")
+        st.success(empty)
         return
 
     total = sum(item.amount_minor for item in items)
@@ -1461,7 +1484,9 @@ def screen_attention(run: StoredRun) -> None:
 
     severities = sorted({item.severity for item in items})
     options = ["All", *severities]
-    chosen = _picked(st.selectbox("Show", options, key="attn_sev"), options)
+    chosen = _picked(
+        st.selectbox("Show", options, key=f"{key_prefix}_attn_sev"), options
+    )
     shown = [item for item in items if chosen == "All" or item.severity == chosen]
     if len(shown) != len(items):
         st.caption(
@@ -1476,15 +1501,30 @@ def screen_attention(run: StoredRun) -> None:
             f"Showing the {_CARD_LIMIT} largest of {len(shown)}. The rest are in "
             "the full queue below."
         )
-    with st.expander("The whole queue as a table (technical)"):
-        screen_exceptions(run)
+    if table is not None:
+        with st.expander("The whole queue as a table (technical)"):
+            table()
 
 
-def screen_transactions(run: StoredRun) -> None:
-    """Every decision the run committed, filterable and searchable."""
-    rows = transaction_rows(run)
+def screen_attention(run: StoredRun) -> None:
+    """The review queue for a bundled report."""
+    _attention_body(
+        attention_items(run),
+        key_prefix="report",
+        empty="Nothing needs your attention in this run.",
+        table=lambda: screen_exceptions(run),
+    )
+
+
+def _transactions_body(
+    rows: list[dict[str, object]],
+    filtered: Callable[[str | None], list[dict[str, object]]],
+    *,
+    key_prefix: str,
+) -> None:
+    """The decision table, drawn once for both a stored report and an upload."""
     if not rows:
-        st.info("This run recorded no decisions.")
+        st.info("No decisions were recorded.")
         return
 
     st.subheader("Transactions")
@@ -1496,20 +1536,21 @@ def screen_transactions(run: StoredRun) -> None:
     statuses = sorted({str(row["Status"]) for row in rows})
     options = ["All", *statuses]
     columns = st.columns([1, 2])
-    chosen = _picked(columns[0].selectbox("Status", options, key="tx_status"), options)
+    chosen = _picked(
+        columns[0].selectbox("Status", options, key=f"{key_prefix}_tx_status"), options
+    )
     query = columns[1].text_input(
         "Search",
         placeholder="Payment or bank reference, e.g. PAY-00041",
-        key="tx_search",
+        key=f"{key_prefix}_tx_search",
     )
 
-    shown = transaction_rows(run, status=None if chosen == "All" else chosen)
+    shown = filtered(None if chosen == "All" else chosen)
     shown = transaction_search(shown, query or "")
     st.caption(
         f"Showing {len(shown):,} of {len(rows):,}. There is no amount column "
-        "because the run record does not store an amount per match -- the money "
-        "totals are on Overview, and every amount under review is in Needs "
-        "attention."
+        "because no amount is recorded per match -- the money totals are on "
+        "Overview, and every amount under review is in Needs review."
     )
     st.dataframe(
         [
@@ -1530,12 +1571,33 @@ def screen_transactions(run: StoredRun) -> None:
     )
 
 
-def screen_why(run: StoredRun) -> None:
-    """One record, explained without jargon, with the jargon one click away."""
-    keys = record_keys(run)
+def screen_transactions(run: StoredRun) -> None:
+    """Every decision a bundled report committed."""
+    _transactions_body(
+        transaction_rows(run),
+        lambda status: transaction_rows(run, status=status),
+        key_prefix="report",
+    )
+
+
+def _why_body(
+    decisions: Sequence[MatchDecision],
+    exceptions: Sequence[ReconException],
+    keys: Sequence[str],
+    *,
+    key_prefix: str,
+) -> None:
+    """One record explained, drawn once for both a report and an upload."""
     if not keys:
-        st.info("This run recorded no decisions or exceptions.")
+        st.info("No decisions or exceptions were recorded.")
         return
+
+    def naming(key: str) -> list[MatchDecision]:
+        return [
+            decision
+            for decision in decisions
+            if key in (decision.source_ref.key, decision.target_ref.key)
+        ]
 
     st.subheader("Why it matched")
     st.markdown(
@@ -1551,13 +1613,15 @@ def screen_why(run: StoredRun) -> None:
         for key in keys
         if any(
             decision.outcome is DecisionOutcome.AUTO_MATCHED
-            for decision in run.decisions_for(key)
+            for decision in naming(key)
         )
     ]
     seen = set(matched_first)
     ordered = matched_first + [key for key in keys if key not in seen]
-    chosen = _picked(st.selectbox("Record", ordered, key="why_record"), ordered)
-    story = match_story(run, chosen)
+    chosen = _picked(
+        st.selectbox("Record", ordered, key=f"{key_prefix}_why_record"), ordered
+    )
+    story = match_story_from(naming(chosen), exceptions, chosen)
 
     if story.matched:
         st.success(f"{_TICK} {story.headline}")
@@ -1589,6 +1653,13 @@ def screen_why(run: StoredRun) -> None:
             "recomputed. The full event-by-event replay is in **Technical "
             "report**."
         )
+
+
+def screen_why(run: StoredRun) -> None:
+    """One record from a bundled report, explained without jargon."""
+    _why_body(
+        run.decisions, run.exceptions, record_keys(run), key_prefix="report"
+    )
 
 
 def _assistant_panel(run: StoredRun) -> None:
@@ -1741,6 +1812,266 @@ def screen_report(run: StoredRun) -> None:
     st.divider()
     screen_evidence(run)
 
+
+# --------------------------------------------------------------------------
+# The same five screens, for files the reader brought themselves
+#
+# Not a second dashboard. Each of these calls the shaping functions the
+# report-backed screens call -- `attention_items_from`, `transaction_rows_from`,
+# `match_story_from`, `tier_stages_from` -- and differs only where an upload
+# genuinely cannot answer the question a report can.
+#
+# There is exactly one such place, and it is the accuracy figures. Precision,
+# recall and the match rate are scored against a hand-checked answer key. An
+# upload has none, so those are absent and *said to be absent*, rather than
+# rendered as a zero that would read as "nothing went wrong".
+# --------------------------------------------------------------------------
+def screen_home_upload(result: ReconcileResult) -> None:
+    """Overview, for uploaded files."""
+    view = upload_snapshot(result)
+    st.markdown(
+        '<p class="ll-lede">This is what LedgerLoop did with the records you '
+        "uploaded. It matched what it could prove and left the rest for a "
+        "person.</p>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            "",
+            "Transactions read",
+            f"{view.records:,}",
+            "records across the files you supplied",
+            "brand",
+        )
+        + _big_card(
+            _TICK,
+            "Confidently matched",
+            f"{view.matched:,}",
+            "payments linked to a bank credit",
+            "good",
+        )
+        + _big_card(
+            _WARN,
+            "Need your attention",
+            f"{view.queue:,}",
+            "LedgerLoop would not guess at these",
+            "warn",
+        )
+        + _big_card(
+            _RUPEE,
+            "Value matched",
+            view.matched_value,
+            "on the links it committed",
+            "brand",
+            money=True,
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "**How many of those matches were correct is not shown, because it "
+        "cannot be known from your files alone.** Precision and recall are "
+        "measured against a hand-checked answer key -- somebody's finished "
+        "reconciliation of the same period -- and an export does not come with "
+        "one. Every figure above is a statement about what LedgerLoop *did*."
+    )
+
+    if result.llm_used:
+        st.success(
+            f"The AI assistant was called {result.llm_calls} time(s). Everything "
+            "it suggested was re-checked against your files before being "
+            "accepted."
+        )
+    else:
+        st.caption("Deterministic: no AI model was called for this result.")
+
+    st.divider()
+    st.subheader("What was in your files")
+    st.markdown(
+        '<div class="ll-split">'
+        + _destination(
+            Bucket(
+                "open",
+                "Payments",
+                view.payments,
+                "from your processor report",
+                "muted",
+            )
+        )
+        + _destination(
+            Bucket(
+                "open",
+                "Payouts",
+                view.payouts,
+                "batches the processor reported",
+                "muted",
+            )
+        )
+        + _destination(
+            Bucket(
+                "open",
+                "Bank rows",
+                view.bank_rows,
+                "credits and debits your bank posted",
+                "muted",
+            )
+        )
+        + _destination(
+            Bucket(
+                "open",
+                "Orders",
+                view.orders,
+                "from your ledger, if you supplied one",
+                "muted",
+            )
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    if view.quarantined:
+        st.warning(
+            f"{view.quarantined:,} row(s) could not be read and were set aside "
+            "rather than guessed at. They are listed under **Accuracy & "
+            "details**."
+        )
+
+    if view.queue:
+        st.divider()
+        st.info(
+            f"**Next:** open **Needs review** -- {view.queue:,} item(s) worth "
+            f"{view.queue_value}, largest first. Each says what was found and "
+            "what to do about it."
+        )
+
+
+def screen_attention_upload(result: ReconcileResult) -> None:
+    """Needs review, for uploaded files."""
+    _attention_body(
+        attention_items_from(result.exceptions),
+        key_prefix="up",
+        empty="Nothing in your files needs attention.",
+    )
+
+
+def screen_transactions_upload(result: ReconcileResult) -> None:
+    """Transactions, for uploaded files."""
+    _transactions_body(
+        transaction_rows_from(result.matched.decisions),
+        lambda status: transaction_rows_from(result.matched.decisions, status=status),
+        key_prefix="up",
+    )
+
+
+def screen_why_upload(result: ReconcileResult) -> None:
+    """Why it matched, for uploaded files."""
+    decisions = list(result.matched.decisions)
+    keys = sorted(
+        {ref.key for d in decisions for ref in (d.source_ref, d.target_ref)}
+        | {ref.key for item in result.exceptions for ref in item.involved_refs}
+    )
+    _why_body(decisions, list(result.exceptions), keys, key_prefix="up")
+
+
+def screen_report_upload(result: ReconcileResult) -> None:
+    """Accuracy & details, for uploaded files.
+
+    The accuracy half is genuinely unavailable and says so. The details half --
+    which rung matched what, what the ingest layer had to set aside, what the
+    assistant did -- needs no answer key at all, and withholding it would have
+    been laziness dressed up as rigour.
+    """
+    view = upload_snapshot(result)
+    st.subheader("Accuracy and details")
+    st.warning(
+        "**No accuracy figures for your own files.** Precision, recall and the "
+        "match rate each compare what LedgerLoop found against what is *really* "
+        "there, and knowing what is really there means somebody reconciling the "
+        "period by hand first. Your files do not carry that, so those numbers "
+        "are absent rather than estimated. The bundled sample reports do carry "
+        "it, and this screen reports all of it for them."
+    )
+
+    st.divider()
+    st.subheader("How it got there")
+    st.caption(
+        "Six rungs, cheapest and most certain first. Each only sees what the "
+        "rungs above it left behind."
+    )
+    stages = upload_tier_stages(result)
+    flow: list[str] = []
+    for index, stage in enumerate(stages):
+        if index:
+            flow.append('<div class="ll-arrow">&#8594;</div>')
+        flow.append(_rung_card(stage))
+    st.markdown('<div class="ll-flow">' + "".join(flow) + "</div>", unsafe_allow_html=True)
+    st.caption(
+        "**Proposed** is yield and **matched** is conviction. The gap is the "
+        "review queue a finance team has to staff -- and it needs no answer key "
+        "to measure, because it counts what the system did rather than whether "
+        "it was right."
+    )
+
+    st.divider()
+    _assistant_panel_upload(result)
+
+    st.divider()
+    st.subheader("What was read")
+    st.dataframe(
+        [
+            {"Source": "Orders (your ledger)", "Records": view.orders},
+            {"Source": "Payments (processor report)", "Records": view.payments},
+            {"Source": "Payouts (processor report)", "Records": view.payouts},
+            {"Source": "Bank transactions", "Records": view.bank_rows},
+            {"Source": "Rows set aside as unreadable", "Records": view.quarantined},
+        ],
+        width="stretch",
+        hide_index=True,
+    )
+    if result.ingest.problems:
+        with st.expander(f"The {view.quarantined} row(s) that could not be read"):
+            st.dataframe(
+                [
+                    {
+                        "Source": problem.source.value,
+                        "Record": problem.record_id or "",
+                        "Why": problem.detail,
+                    }
+                    for problem in result.ingest.problems[:200]
+                ],
+                width="stretch",
+                hide_index=True,
+            )
+
+
+def _assistant_panel_upload(result: ReconcileResult) -> None:
+    """What the model did on an upload, read from the run's own cost ledger."""
+    st.subheader("What the AI assistant did")
+    if not result.llm_used:
+        st.info(
+            "**No AI model was called for this result.** Everything above came "
+            "from the deterministic rules. Tick the box on **Your files** before "
+            "running to involve one."
+        )
+        return
+    st.markdown(
+        '<div class="ll-big-grid">'
+        + _big_card(
+            "",
+            "Calls made",
+            f"{result.llm_calls:,}",
+            "each one re-checked before it counted",
+            "brand",
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "The assistant may read a narration the rules could not parse and "
+        "suggest a link for what is left over. It may **never** decide a match, "
+        "do arithmetic or set a confidence."
+    )
 
 
 def _model_available() -> bool:
@@ -1965,169 +2296,54 @@ def _reconcile_uploads() -> None:
 
 
 def _upload_results(result: ReconcileResult) -> None:
-    """What happened, in the same plain words the Overview uses."""
+    """The receipt for a run, and a pointer to the screens that read it.
+
+    Deliberately short. Everything a reader wants to know about their files is
+    answered by the five tabs beside this one, on the same screens the bundled
+    reports use -- so this says the run finished and what it found, and sends
+    them there rather than growing a second dashboard inside one tab.
+    """
+    view = upload_snapshot(result)
     st.divider()
-    st.subheader("Result")
-    ingest = result.ingest
+    st.subheader("Done")
     st.markdown(
         '<div class="ll-big-grid">'
         + _big_card(
             "",
             "Transactions read",
-            f"{ingest.record_count:,}",
+            f"{view.records:,}",
             "records across the files you supplied",
             "brand",
         )
         + _big_card(
             _TICK,
             "Confidently matched",
-            f"{result.committed_links:,}",
+            f"{view.matched:,}",
             "payments linked to a bank credit",
             "good",
         )
         + _big_card(
             _WARN,
             "Need your attention",
-            f"{result.queue_size:,}",
+            f"{view.queue:,}",
             "LedgerLoop would not guess at these",
             "warn",
-        )
-        + _big_card(
-            _RUPEE,
-            "Value matched",
-            format_minor(result.committed_minor),
-            "on the links it committed",
-            "brand",
-            money=True,
         )
         + "</div>",
         unsafe_allow_html=True,
     )
-    if result.llm_used:
-        st.info(
-            f"The AI assistant was called {result.llm_calls} time(s). Everything "
-            "it suggested was re-checked against your files before being "
-            "accepted, and anything that did not add up was sent for review."
+    if view.quarantined:
+        st.warning(
+            f"{view.quarantined:,} row(s) could not be read and were set aside "
+            "rather than guessed at. They are listed under "
+            "**Accuracy & details**."
         )
-    else:
-        st.caption(
-            "Deterministic: no AI model was called for this result."
-        )
-    st.caption(
-        "**No accuracy figures are shown for your own files, on purpose.** "
-        "Precision and recall are measured against a hand-checked answer key, "
-        "and your files do not come with one. Everything above is a statement "
-        "about what LedgerLoop *did*, never a claim about whether it was right."
+    st.success(
+        "**Every tab now describes your files.** Overview for the money, "
+        "Needs review for the queue, Transactions for every decision, Why it "
+        "matched to check one of them, Accuracy & details for the rungs and "
+        "what was read. The sidebar switches back to a sample report."
     )
-
-    if result.exceptions:
-        st.markdown("**What needs a person**")
-        for item in sorted(
-            result.exceptions, key=lambda x: -x.impact_minor
-        )[:10]:
-            st.markdown(
-                f'<div class="ll-item">'
-                f'<div class="ll-item-amt">{_esc(format_minor(item.impact_minor))}</div>'
-                f'<div class="ll-item-body"><strong>What we found.</strong> '
-                f"{_esc(item.root_cause)}</div>"
-                f'<div class="ll-item-act"><strong>What to do.</strong> '
-                f"{_esc(item.suggested_action)}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        if len(result.exceptions) > 10:
-            st.caption(
-                f"Showing the 10 largest of {len(result.exceptions)}."
-            )
-
-    st.divider()
-    st.subheader("Every decision on your files")
-    rows = transaction_rows_from(result.matched.decisions)
-    if rows:
-        statuses = sorted({str(row["Status"]) for row in rows})
-        options = ["All", *statuses]
-        columns = st.columns([1, 2])
-        chosen = _picked(columns[0].selectbox("Status", options, key="up_status"), options)
-        query = columns[1].text_input(
-            "Search",
-            placeholder="Payment or bank reference",
-            key="up_search",
-        )
-        shown = transaction_rows_from(
-            result.matched.decisions, status=None if chosen == "All" else chosen
-        )
-        shown = transaction_search(shown, query or "")
-        st.caption(f"Showing {len(shown):,} of {len(rows):,}.")
-        st.dataframe(
-            [
-                {
-                    key: row[key]
-                    for key in (
-                        "Status",
-                        "Payment",
-                        "Bank transaction",
-                        "How it was matched",
-                        "Confidence",
-                    )
-                }
-                for row in shown
-            ],
-            width="stretch",
-            hide_index=True,
-        )
-
-        st.divider()
-        st.subheader("Why one of them matched")
-        keys = [str(row["record_key"]) for row in rows]
-        picked = _picked(st.selectbox("Record", keys, key="up_why"), keys)
-        story = match_story_from(
-            [d for d in result.matched.decisions if picked in
-             (d.source_ref.key, d.target_ref.key)],
-            result.exceptions,
-            picked,
-        )
-        if story.matched:
-            st.success(f"{_TICK} {story.headline}")
-        else:
-            st.warning(f"{_WARN} {story.headline}")
-        if story.partner:
-            st.markdown(f"**{picked}** to **{story.partner}**")
-        if story.stage:
-            st.markdown(f"**How it was matched.** {story.stage}")
-        st.markdown("**Why:**")
-        st.markdown(
-            '<ul class="ll-reasons">'
-            + "".join(f"<li>{_esc(reason)}</li>" for reason in story.reasons)
-            + "</ul>",
-            unsafe_allow_html=True,
-        )
-        if story.confidence:
-            st.markdown(f"**Confidence.** {story.confidence}")
-        with st.expander("Technical details"):
-            st.write(dict(story.technical))
-    else:
-        st.caption("No links were committed, so there is nothing to list.")
-
-    with st.expander("Advanced reconciliation details"):
-        st.write(
-            {
-                "Orders read": len(ingest.orders),
-                "Payments read": len(ingest.payments),
-                "Payouts read": len(ingest.settlements),
-                "Bank rows read": len(ingest.bank_txns),
-                "Rows quarantined by ingest": len(ingest.problems),
-                "Candidates proposed": len(result.matched.candidates),
-                "Committed links": result.committed_links,
-                "Exception queue": result.queue_size,
-                "AI assistant calls": result.llm_calls,
-            }
-        )
-        st.caption(
-            "No precision, recall or match rate: each is scored against ground "
-            "truth, which uploaded files do not carry. The bundled reports in "
-            "the sidebar do carry it, and **Accuracy & details** reports all of "
-            "it for them."
-        )
 
 # --------------------------------------------------------------------------
 # The run launcher
@@ -2245,6 +2461,27 @@ def main() -> None:
         st.caption("Automatic payment reconciliation")
         st.divider()
         st.markdown("**Reports**")
+        # An upload sits in the same list as the bundled samples, because to a
+        # reader it *is* another report -- the one they brought. Putting it in a
+        # separate control would have kept the split that made the tabs confusing
+        # in the first place.
+        upload = st.session_state.get("upload_result")
+        if upload is not None:
+            picked_scope = st.radio(
+                "Showing",
+                ("Your files", "A sample report"),
+                key="scope",
+                label_visibility="collapsed",
+            )
+            st.session_state["show_upload"] = picked_scope == "Your files"
+            st.caption(
+                f"{cast('ReconcileResult', upload).ingest.record_count:,} records "
+                "you uploaded"
+                if st.session_state["show_upload"]
+                else "the bundled corpus below"
+            )
+        else:
+            st.session_state["show_upload"] = False
         if runs:
             # Labelled by what the report *is*, not by the run id. `t0t4-test-42`
             # names a ladder, a split and a seed: exactly what someone
@@ -2291,7 +2528,18 @@ def main() -> None:
                     "writes. This interface renders them and computes nothing."
                 )
 
-    _hero(selected)
+    upload = st.session_state.get("upload_result")
+    show_upload = bool(st.session_state.get("show_upload")) and upload is not None
+    if show_upload:
+        held = cast("ReconcileResult", upload)
+        _hero(
+            None,
+            chip=f"AI assistant used on {held.llm_calls} item(s)"
+            if held.llm_used
+            else "No AI model used — every figure is repeatable",
+        )
+    else:
+        _hero(selected)
 
     # Five reader-facing screens, then the launcher. The order is the order a
     # person asks the questions in: what happened, what do I do, show me
@@ -2312,38 +2560,53 @@ def main() -> None:
     # first thing on the page.
     with tabs[0]:
         screen_upload()
-    screens = (
+    # The same five questions, answered about whichever subject the sidebar is
+    # pointing at. Piling an upload's whole result onto the first tab was the
+    # earlier design and it was wrong twice over: the screens built to answer
+    # these questions sat unused, and a reader had to learn that "your files"
+    # meant something different from every other tab.
+    report_screens = (
         screen_home,
         screen_attention,
         screen_transactions,
         screen_why,
         screen_report,
     )
-    # The notice exists because the layout invites a wrong conclusion. A person
-    # uploads their files, reads a result on the first tab, clicks the second,
-    # and sees an unrelated bundled corpus with no indication that the subject
-    # changed. Three different datasets, no signposting. Saying so on every one
-    # of these screens is the least the interface owes them.
-    uploaded = st.session_state.get("upload_result") is not None
-    for tab, screen in zip(tabs[1:6], screens, strict=True):
+    upload_screens = (
+        screen_home_upload,
+        screen_attention_upload,
+        screen_transactions_upload,
+        screen_why_upload,
+        screen_report_upload,
+    )
+    for tab, report_screen, upload_screen in zip(
+        tabs[1:6], report_screens, upload_screens, strict=True
+    ):
         with tab:
+            if show_upload:
+                st.caption(
+                    f"{_FOLDER} Your files — "
+                    f"{cast('ReconcileResult', upload).ingest.record_count:,} "
+                    "records you uploaded. Switch subject in the sidebar."
+                )
+                upload_screen(cast("ReconcileResult", upload))
+                continue
             if selected is None:
                 st.info(
                     "These screens describe a finished report. Upload your files "
                     "on **Your files**, or create a sample one on **Sample data**."
                 )
                 continue
-            if uploaded:
-                st.warning(
-                    f"**This is the sample report "
+            if upload is not None:
+                # Only reachable when the reader has deliberately switched to a
+                # sample while holding a result of their own, so this says which
+                # subject they are looking at rather than warning them off.
+                st.caption(
+                    f"{_FOLDER} Sample report — "
                     f"'{labels.get(selected.run_id, selected.run_id)}', not your "
-                    "uploaded files.** Your result -- and everything LedgerLoop "
-                    "could work out from it -- is on **Your files**. These "
-                    "screens quote precision and recall, which are scored "
-                    "against a hand-checked answer key that only the bundled "
-                    "samples have."
+                    "uploaded files."
                 )
-            screen(selected)
+            report_screen(selected)
     with tabs[6]:
         screen_run()
 

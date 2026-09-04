@@ -55,6 +55,10 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ledgerloop.eval.harness import ReconcileResult
+from ledgerloop.money import format_minor
+from ledgerloop.ui.views import TierStage, tier_stages_from
+
 __all__ = [
     "CAPABILITIES",
     "MAX_UPLOAD_BYTES",
@@ -62,8 +66,11 @@ __all__ = [
     "Assessment",
     "SourceKind",
     "UploadProblem",
+    "UploadSnapshot",
     "assess",
     "detect",
+    "upload_snapshot",
+    "upload_tier_stages",
     "validate",
 ]
 
@@ -353,3 +360,80 @@ CAPABILITIES: dict[frozenset[SourceKind], Assessment] = {
 def assess(sources: frozenset[SourceKind] | set[SourceKind]) -> Assessment:
     """What this combination of sources can do."""
     return CAPABILITIES[frozenset(sources)]
+
+
+# --------------------------------------------------------------------------
+# The headline for files nobody has an answer key for
+#
+# This lives here rather than in `plain.py` for a reason the test suite
+# enforces: `plain` and `views` are translation layers over a *stored run* and
+# are forbidden from importing `ledgerloop.eval` or `ledgerloop.matching`, so
+# they can never disagree with the record they are supposed to be reading. An
+# upload has no stored run -- it has a live `ReconcileResult` -- so shaping it
+# belongs on this side of that line.
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class UploadSnapshot:
+    """What is true about an uploaded reconciliation, and nothing else.
+
+    Deliberately **not** :class:`~ledgerloop.ui.plain.Snapshot`. That one
+    carries precision, false positives and a reconciled-money figure, every one
+    of which is scored against ground truth. Reusing it here would have printed
+    ``0 incorrect matches`` over somebody's own files -- which reads as a clean
+    bill of health and is in fact a statement about a corpus they never saw.
+
+    :attr:`incorrect` is therefore ``None`` and can only ever be ``None``. The
+    honest value is *unknown*, the type says so, and the screen says so in
+    words.
+    """
+
+    records: int
+    orders: int
+    payments: int
+    payouts: int
+    bank_rows: int
+    matched: int
+    queue: int
+    matched_value: str
+    queue_value: str
+    quarantined: int
+    incorrect: None = None
+
+
+def upload_snapshot(result: ReconcileResult) -> UploadSnapshot:
+    """Everything true about an uploaded reconciliation, and nothing else."""
+    ingest = result.ingest
+    return UploadSnapshot(
+        records=ingest.record_count,
+        orders=len(ingest.orders),
+        payments=len(ingest.payments),
+        payouts=len(ingest.settlements),
+        bank_rows=len(ingest.bank_txns),
+        matched=result.committed_links,
+        queue=result.queue_size,
+        matched_value=format_minor(result.committed_minor),
+        queue_value=format_minor(result.queue_minor),
+        quarantined=len(ingest.problems),
+    )
+
+
+def upload_tier_stages(result: ReconcileResult) -> list[TierStage]:
+    """The ladder an upload went through, drawn exactly as a report's is.
+
+    The counts come off ``MatchRun.tier_contributions``, which needs no ground
+    truth: how many candidates a rung proposed and how many it committed is a
+    fact about the run, not about whether the run was right. That is why this
+    screen survives on files with no answer key when the accuracy figures
+    cannot.
+    """
+    return tier_stages_from(
+        {
+            row.tier.name: {
+                "candidates_proposed": row.candidates_proposed,
+                "auto_matched": row.auto_matched,
+                "marginal_auto_matched": row.marginal_auto_matched,
+                "wall_clock_ms": row.wall_clock_ms,
+            }
+            for row in result.matched.tier_contributions
+        }
+    )

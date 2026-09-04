@@ -297,7 +297,15 @@ class TestTheUiReportsWhatHappened:
                 f"a free-text input at line {index + 1} is not a search box; "
                 "check what it collects"
             )
-            assert "key" not in following.replace("key=", "")
+            # Credential words, not the bare substring "key": widget ids are
+            # legitimately built from a `key=` / `key_prefix` argument, and a
+            # test that trips over Streamlit's own parameter name teaches
+            # nothing about what the box collects.
+            for word in ("api", "token", "secret", "password", "credential"):
+                assert word not in following, (
+                    f"a free-text input at line {index + 1} mentions {word!r}; "
+                    "check what it collects"
+                )
 
     @pytest.mark.parametrize("calls", [0, 1, 9])
     def test_used_follows_calls_made_not_a_key_existing(self, calls):

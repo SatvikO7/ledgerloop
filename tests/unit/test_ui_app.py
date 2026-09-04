@@ -60,6 +60,19 @@ def _app(monkeypatch, runs, data_root):
     return AppTest.from_file(APP, default_timeout=120)
 
 
+@pytest.fixture(scope="module")
+def uploaded(workspace):
+    """A real reconciliation of files with no answer key.
+
+    The subject of the upload-scope tests: a `ReconcileResult` rather than a
+    `StoredRun`, which is exactly the difference those screens exist to handle.
+    """
+    from ledgerloop.eval.harness import reconcile_only
+
+    corpus, _ = workspace
+    return reconcile_only(corpus)
+
+
 def _tab(test, label: str):
     """The tab with this label.
 
@@ -781,9 +794,12 @@ class TestTheTransactionList:
     def test_it_can_be_filtered_and_searched(self, workspace, monkeypatch):
         corpus, runs = workspace
         test = _app(monkeypatch, runs, corpus.parent).run()
+        # Prefixed by scope: the same filters are drawn for an upload, and
+        # Streamlit derives a widget id from its label, so two unprefixed
+        # copies would collide the moment both are on screen.
         keys = {widget.key for widget in test.selectbox}
-        assert "tx_status" in keys
-        assert any(widget.key == "tx_search" for widget in test.text_input)
+        assert "report_tx_status" in keys
+        assert any(widget.key == "report_tx_search" for widget in test.text_input)
 
     def test_it_says_why_there_is_no_amount_column(self, workspace, monkeypatch):
         """The run record stores no amount per matched link. Saying so is the
@@ -829,3 +845,71 @@ class TestTheRunScreen:
         test.button(key="generate").click().run()
         assert not test.exception
         assert (data_root / "dev-standard-42" / "manifest.json").is_file()
+
+
+class TestUploadedFilesGetTheSameScreens:
+    """The subject the tabs describe follows the sidebar, not the tab index.
+
+    Source-reading tests can prove the upload screens exist and are wired. Only
+    executing the script proves they *render* -- and the failure mode they guard
+    against is exactly the kind that renders a traceback behind an HTTP 200:
+    a `StreamlitDuplicateElementId` from two identically-labelled filters, or a
+    view helper reaching for a ground-truth field an upload has not got.
+    """
+
+    @staticmethod
+    def _scoped(monkeypatch, workspace, uploaded, *, show: bool):
+        corpus, runs = workspace
+        test = _app(monkeypatch, runs, corpus.parent).run()
+        test.session_state["upload_result"] = uploaded
+        # Through the radio's own key, not `show_upload`: the sidebar derives
+        # that flag from the radio on every rerun, so setting it directly would
+        # be overwritten before a single tab is drawn.
+        test.session_state["scope"] = "Your files" if show else "A sample report"
+        return test.run()
+
+    def test_every_tab_renders_the_upload_without_raising(
+        self, workspace, uploaded, monkeypatch
+    ):
+        test = self._scoped(monkeypatch, workspace, uploaded, show=True)
+        assert not test.exception
+
+    def test_each_screen_names_the_subject_it_is_describing(
+        self, workspace, uploaded, monkeypatch
+    ):
+        test = self._scoped(monkeypatch, workspace, uploaded, show=True)
+        captions = " ".join(item.value for item in test.caption)
+        assert "Your files" in captions
+        assert f"{uploaded.ingest.record_count:,} records you uploaded" in captions
+
+    def test_the_upload_is_not_quoted_an_accuracy_figure(
+        self, workspace, uploaded, monkeypatch
+    ):
+        """`0 incorrect matches` over somebody's own files would be the most
+        damaging sentence this dashboard could print: it reads as a clean bill
+        of health and is in fact a statement about a corpus they never saw."""
+        test = self._scoped(monkeypatch, workspace, uploaded, show=True)
+        text = " ".join(
+            item.value for item in list(test.markdown) + list(test.warning)
+        )
+        assert "No accuracy figures for your own files" in text
+        assert "incorrect match" not in text
+
+    def test_switching_back_shows_the_sample_and_says_so(
+        self, workspace, uploaded, monkeypatch
+    ):
+        test = self._scoped(monkeypatch, workspace, uploaded, show=False)
+        assert not test.exception
+        captions = " ".join(item.value for item in test.caption)
+        assert "Sample report" in captions
+        assert "not your uploaded files" in captions
+
+    def test_the_sidebar_offers_the_switch_only_once_there_is_something_to_switch_to(
+        self, workspace, uploaded, monkeypatch
+    ):
+        corpus, runs = workspace
+        before = _app(monkeypatch, runs, corpus.parent).run()
+        assert "Showing" not in [radio.label for radio in before.sidebar.radio]
+
+        after = self._scoped(monkeypatch, workspace, uploaded, show=True)
+        assert "Showing" in [radio.label for radio in after.sidebar.radio]

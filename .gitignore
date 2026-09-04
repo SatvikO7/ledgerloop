@@ -58,6 +58,9 @@ PROGRESS.md
 .DS_Store
 Thumbs.db
 
+# Personal presentation notes. Never pushed.
+txt/
+
 # Never commit secrets.
 .env
 .env.local

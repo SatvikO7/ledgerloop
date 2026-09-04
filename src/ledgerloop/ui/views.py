@@ -40,6 +40,7 @@ three columns, never one "matched" figure.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +69,7 @@ __all__ = [
     "record_keys",
     "tier_rows",
     "tier_stages",
+    "tier_stages_from",
     "trace_record",
 ]
 
@@ -518,11 +520,22 @@ def tier_stages(run: StoredRun) -> list[TierStage]:
     differ: T5 is switched off without a key, while T4 runs on every corpus and
     genuinely finds nothing.
     """
-    measured = {
-        str(row.get("tier", "")): row
-        for row in run.summary.get("tiers", [])
-        if isinstance(row, dict)
-    }
+    return tier_stages_from(
+        {
+            str(row.get("tier", "")): row
+            for row in run.summary.get("tiers", [])
+            if isinstance(row, dict)
+        }
+    )
+
+
+def tier_stages_from(measured: Mapping[str, Mapping[str, Any]]) -> list[TierStage]:
+    """The ladder from raw per-tier counts, whatever produced them.
+
+    Split out so uploaded files -- which have tier contributions but no stored
+    run -- get this drawing rather than a second one written for them. A rung
+    absent from ``measured`` is still reported as *did not run*.
+    """
     stages: list[TierStage] = []
     for name, label, purpose in LADDER:
         row = measured.get(name)

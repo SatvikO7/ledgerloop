@@ -484,31 +484,94 @@ class TestUploadedDataIsSelfContained:
                 f"{wrapper.__name__} no longer delegates to {worker.__name__}"
             )
 
-    def test_the_upload_screen_shows_decisions_and_a_worked_example(self):
+    def test_every_reader_screen_has_an_upload_counterpart(self):
+        """The design this replaced put an upload's whole result on one tab.
+
+        It read as a second dashboard bolted to the side of the first: the five
+        screens built to answer these questions sat unused showing a bundled
+        corpus, and "Your files" meant something structurally different from
+        every tab beside it. Each reader-facing screen now answers its question
+        about whichever subject the sidebar points at.
+        """
         source = (
             Path(__file__).resolve().parents[2]
             / "src" / "ledgerloop" / "ui" / "app.py"
         ).read_text(encoding="utf-8")
-        start = source.index("def _upload_results(")
-        end = source.index(chr(10) + "def ", start + 10)
-        body = source[start:end]
-        assert "Every decision on your files" in body
-        assert "Why one of them matched" in body
-        assert "transaction_rows_from" in body
-        assert "match_story_from" in body
+        for name in (
+            "screen_home_upload",
+            "screen_attention_upload",
+            "screen_transactions_upload",
+            "screen_why_upload",
+            "screen_report_upload",
+        ):
+            assert f"def {name}(result: ReconcileResult) -> None:" in source, name
+            assert f"        {name}," in source, f"{name} is defined but never wired"
 
-    def test_the_sample_screens_say_they_are_not_your_files(self):
-        """The other half. A screen that cannot show the upload must not be
-        mistakable for one that does."""
+    def test_the_two_scopes_share_one_implementation(self):
+        """A report screen and its upload counterpart must render through the
+        same body. Two copies drift, and the copy nobody demos drifts first."""
+        import inspect
+
+        from ledgerloop.ui import app
+
+        for screen, body in (
+            (app.screen_attention, "_attention_body"),
+            (app.screen_attention_upload, "_attention_body"),
+            (app.screen_transactions, "_transactions_body"),
+            (app.screen_transactions_upload, "_transactions_body"),
+            (app.screen_why, "_why_body"),
+            (app.screen_why_upload, "_why_body"),
+        ):
+            assert body in inspect.getsource(screen), (
+                f"{screen.__name__} no longer goes through {body}"
+            )
+
+    def test_the_shared_bodies_take_a_widget_key_prefix(self):
+        """Streamlit derives a widget id from its label and options, so the two
+        scopes' identically-labelled filters would collide without one. The
+        crash this prevents is `StreamlitDuplicateElementId`, and it has already
+        happened once on this screen."""
+        import inspect
+
+        from ledgerloop.ui import app
+
+        for func in (app._attention_body, app._transactions_body, app._why_body):
+            assert "key_prefix" in inspect.signature(func).parameters, func.__name__
+            assert 'key=f"{key_prefix}' in inspect.getsource(func), func.__name__
+
+    def test_an_upload_never_renders_an_accuracy_figure(self):
+        """The one question an upload genuinely cannot answer, and the only
+        place the two scopes are allowed to differ. Precision, recall and the
+        match rate are scored against a hand-checked answer key; rendering a
+        zero here would read as "nothing went wrong"."""
+        import inspect
+        import re
+
+        from ledgerloop.ui import app
+
+        body = inspect.getsource(app.screen_report_upload)
+        assert "No accuracy figures for your own files" in body
+        # Word-anchored: `upload_snapshot` is the ground-truth-free counterpart
+        # and is exactly what this screen is supposed to call.
+        for forbidden in ("precision", "kpis", "recall_rows", "snapshot"):
+            assert not re.search(rf"\b{forbidden}\(", body), (
+                f"{forbidden}() needs ground truth an upload does not carry"
+            )
+        # ...and it is absent rather than zero, all the way down to the model.
+        from ledgerloop.ui.uploads import UploadSnapshot
+
+        assert UploadSnapshot.__annotations__["incorrect"] == "None"
+
+    def test_the_scope_is_named_on_every_screen_that_shows_it(self):
+        """A reader who scrolls into a number must be able to tell whose files
+        it describes without remembering what they clicked."""
         import re
 
         source = (
             Path(__file__).resolve().parents[2]
             / "src" / "ledgerloop" / "ui" / "app.py"
         ).read_text(encoding="utf-8")
-        # Adjacent string literals are joined, so a sentence the formatter
-        # wrapped across two source lines still reads as one sentence here.
         joined = re.sub(r'"\s*\n\s*f?"', "", source)
-        assert "not your uploaded files" in joined
-        assert "is on **Your files**" in joined
-        assert 'st.session_state.get("upload_result") is not None' in source
+        assert "Your files — " in joined
+        assert "Sample report — " in joined
+        assert 'st.session_state.get("upload_result")' in source
