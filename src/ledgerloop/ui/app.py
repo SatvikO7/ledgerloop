@@ -2168,6 +2168,7 @@ def _accept(kind: SourceKind, name: str, payload: bytes) -> UploadProblem | None
         "rows": row_count(kind, payload),
         "bytes": len(payload),
     }
+    _discard_upload_result()
     return None
 
 
@@ -2211,11 +2212,17 @@ def _upload_card(kind: SourceKind) -> None:
             path = _session_upload_dir() / kind.value
             if path.is_file():
                 path.unlink()
+            _discard_upload_result()
             st.rerun()
 
 
-def screen_upload() -> None:
-    """Bring your own files. The first thing a new visitor sees."""
+def screen_upload(result: ReconcileResult | None) -> None:
+    """Bring your own files. The first thing a new visitor sees.
+
+    ``result`` is the object :func:`main` resolved, not a second read of session
+    state: this screen renders the receipt for exactly the run the five tabs
+    beside it are describing.
+    """
     st.subheader("Upload your files")
     st.markdown(
         '<p class="ll-lede">Add whichever records you have. '
@@ -2276,13 +2283,54 @@ def screen_upload() -> None:
     ):
         _reconcile_uploads()
 
-    result = st.session_state.get("upload_result")
+    failure = st.session_state.get("upload_error")
+    if failure:
+        st.error(f"**Your files could not be read.** {failure}")
+        st.caption(
+            "Nothing was reconciled and nothing is being shown from an earlier "
+            "attempt. Fix the file and run it again."
+        )
     if result is not None:
-        _upload_results(cast("ReconcileResult", result))
+        _upload_results(result)
+
+
+def _current_upload() -> ReconcileResult | None:
+    """The one reconciliation of the reader's own files this script run shows.
+
+    Read **once**, at the top of :func:`main`, and handed down to every screen
+    that needs it. Two reads at two points in the same script run was the defect
+    this replaces: ``screen_upload`` stores the result halfway down the page, so
+    a read above it and a read below it saw different worlds -- the receipt
+    rendered the upload while the five tabs rendered a bundled sample, with no
+    label saying so. :func:`_reconcile_uploads` now reruns the script, so the
+    store is always settled before anything reads it.
+    """
+    return cast("ReconcileResult | None", st.session_state.get("upload_result"))
+
+
+def _discard_upload_result() -> None:
+    """Forget the reconciliation, because the files it described have changed.
+
+    A result outlives the file set that produced it unless something drops it,
+    and a queue computed from three files while two are on screen is exactly the
+    "random-looking data" this module must never show. Adding a file, removing
+    one, or replacing one all invalidate it: the honest state is *not computed
+    yet*, and the reader is told to run it again.
+    """
+    if st.session_state.pop("upload_result", None) is not None:
+        # Remembered so the tabs can *say* the result went away. Dropping it
+        # silently would put a bundled sample back on five screens the reader
+        # had just seen describing their own files, which is the substitution
+        # this module must never make quietly.
+        st.session_state["upload_superseded"] = True
 
 
 def _reconcile_uploads() -> None:
-    """Run the ladder over the uploaded files and keep the result."""
+    """Run the ladder over the uploaded files once, and keep the result.
+
+    Reconciliation happens **here and nowhere else**. Every tab reads what this
+    stored, so no screen re-runs the pipeline and no two screens can disagree.
+    """
     directory = _session_upload_dir()
     client = _ui_client(wanted=bool(st.session_state.get("use_llm", False)))
     with st.spinner("Reading your files and matching what can be proved..."):
@@ -2290,9 +2338,25 @@ def _reconcile_uploads() -> None:
             st.session_state["upload_result"] = reconcile_only(
                 directory, client=client
             )
+            st.session_state.pop("upload_superseded", None)
+            st.session_state.pop("upload_error", None)
         except IngestError as error:
-            st.session_state["upload_result"] = None
-            st.error(f"**Your files could not be read.** {error}")
+            # Drop the previous result and rerun for the same reason the success
+            # path does: `main` already handed this run's screens the *old*
+            # object, so without a rerun a failed reconciliation would leave
+            # five tabs describing the run it just replaced. The message is
+            # carried through session state because the rerun discards
+            # everything drawn so far, including an `st.error` written here.
+            _discard_upload_result()
+            st.session_state["upload_error"] = str(error)
+            st.rerun()
+    # The rerun is not cosmetic. The sidebar, the masthead and the five tabs are
+    # all drawn *above* this call site, so without it they spend this run
+    # describing a world in which no upload exists -- which is precisely how a
+    # bundled sample came to be rendered, unlabelled, underneath a receipt for
+    # the reader's own files. `screen_run` has always done this after its own
+    # two actions; this is the one place that had not.
+    st.rerun()
 
 
 def _upload_results(result: ReconcileResult) -> None:
@@ -2456,6 +2520,14 @@ def main() -> None:
 
     runs = list_runs(_runs_root())
     labels = report_labels(runs)
+
+    # THE authoritative result for this script run, read once, here.
+    #
+    # Everything below -- the sidebar's caption, the masthead's chip, and all
+    # five reader-facing tabs -- is handed this same object. There is no second
+    # read, no second reconciliation, and therefore no way for two screens to
+    # describe two different runs.
+    upload = _current_upload()
     with st.sidebar:
         st.markdown("### LedgerLoop")
         st.caption("Automatic payment reconciliation")
@@ -2465,7 +2537,6 @@ def main() -> None:
         # reader it *is* another report -- the one they brought. Putting it in a
         # separate control would have kept the split that made the tabs confusing
         # in the first place.
-        upload = st.session_state.get("upload_result")
         if upload is not None:
             picked_scope = st.radio(
                 "Showing",
@@ -2473,15 +2544,14 @@ def main() -> None:
                 key="scope",
                 label_visibility="collapsed",
             )
-            st.session_state["show_upload"] = picked_scope == "Your files"
+            showing_upload = picked_scope == "Your files"
             st.caption(
-                f"{cast('ReconcileResult', upload).ingest.record_count:,} records "
-                "you uploaded"
-                if st.session_state["show_upload"]
+                f"{upload.ingest.record_count:,} records you uploaded"
+                if showing_upload
                 else "the bundled corpus below"
             )
         else:
-            st.session_state["show_upload"] = False
+            showing_upload = False
         if runs:
             # Labelled by what the report *is*, not by the run id. `t0t4-test-42`
             # names a ladder, a split and a seed: exactly what someone
@@ -2528,14 +2598,15 @@ def main() -> None:
                     "writes. This interface renders them and computes nothing."
                 )
 
-    upload = st.session_state.get("upload_result")
-    show_upload = bool(st.session_state.get("show_upload")) and upload is not None
-    if show_upload:
-        held = cast("ReconcileResult", upload)
+    # Derived from the one read above, never re-read. `showing_upload` cannot be
+    # true without an `upload`, so no screen can be told to draw a result that
+    # is not there.
+    show_upload = showing_upload and upload is not None
+    if show_upload and upload is not None:
         _hero(
             None,
-            chip=f"AI assistant used on {held.llm_calls} item(s)"
-            if held.llm_used
+            chip=f"AI assistant used on {upload.llm_calls} item(s)"
+            if upload.llm_used
             else "No AI model used — every figure is repeatable",
         )
     else:
@@ -2559,7 +2630,7 @@ def main() -> None:
     # curiosity about a bundled corpus, so the thing they came to do is the
     # first thing on the page.
     with tabs[0]:
-        screen_upload()
+        screen_upload(upload)
     # The same five questions, answered about whichever subject the sidebar is
     # pointing at. Piling an upload's whole result onto the first tab was the
     # earlier design and it was wrong twice over: the screens built to answer
@@ -2583,14 +2654,22 @@ def main() -> None:
         tabs[1:6], report_screens, upload_screens, strict=True
     ):
         with tab:
-            if show_upload:
+            if show_upload and upload is not None:
                 st.caption(
                     f"{_FOLDER} Your files — "
-                    f"{cast('ReconcileResult', upload).ingest.record_count:,} "
-                    "records you uploaded. Switch subject in the sidebar."
+                    f"{upload.ingest.record_count:,} records you uploaded. "
+                    "Switch subject in the sidebar."
                 )
-                upload_screen(cast("ReconcileResult", upload))
+                upload_screen(upload)
                 continue
+            if st.session_state.get("upload_superseded"):
+                st.warning(
+                    "**Your files changed, so the previous result was "
+                    "discarded.** It described a different set of files and "
+                    "would have been wrong here. Press **Start reconciliation** "
+                    "on **Your files** to measure the new set. Anything below "
+                    "is a bundled sample, not your data."
+                )
             if selected is None:
                 st.info(
                     "These screens describe a finished report. Upload your files "
