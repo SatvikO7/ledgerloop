@@ -70,12 +70,13 @@ single stylesheet, not a framework.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import os
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, TypedDict, TypeVar, cast
+from typing import TypedDict, TypeVar, cast
 
 import streamlit as st
 
@@ -952,6 +953,11 @@ def screen_exceptions(run: StoredRun) -> None:
         st.selectbox(
             "Exception",
             options,
+            # Keyed, because its options are the *filtered* queue: unkeyed, its
+            # identity moved every time the severity or class filter moved, and
+            # the reader's choice of evidence chain was dropped on the floor by
+            # a control sitting six lines above it.
+            key="q_exception",
             format_func=lambda value: (
                 f"{by_id[value].severity.value} · "
                 f"{by_id[value].exception_class.value} · "
@@ -2122,11 +2128,19 @@ def _ui_client(*, wanted: bool) -> LLMClient:
 
 
 class _Held(TypedDict):
-    """One accepted upload, as the screen needs to describe it."""
+    """One accepted upload, as the screen needs to describe it.
+
+    ``digest`` is not decoration. Streamlit hands a ``file_uploader`` its file
+    back on **every** rerun, not only the one it arrived on, so the accept path
+    runs again each time a filter moves. It is the digest that tells "the reader
+    dropped a new file" apart from "the same file came round again", and getting
+    that wrong threw away the reader's reconciliation -- see :func:`_accept`.
+    """
 
     filename: str
     rows: int
     bytes: int
+    digest: str
 
 
 def _session_upload_dir() -> Path:
@@ -2157,7 +2171,27 @@ def _accept(kind: SourceKind, name: str, payload: bytes) -> UploadProblem | None
 
     The bytes are written to the session directory under the name the ingester
     expects, so nothing downstream needs to know an upload happened.
+
+    **Accepting the same bytes twice is a no-op, and that is the whole point.**
+    ``st.file_uploader`` returns its held file on every rerun, so this function
+    is reached again on every filter change, every tab click and every search --
+    not just when a file arrives. It used to re-accept unconditionally and
+    therefore call :func:`_discard_upload_result` unconditionally, which deleted
+    the reader's own reconciliation from session state moments after the run
+    that produced it had finished drawing. The next widget interaction then
+    found no upload and fell back to a bundled sample report, with the tabs
+    silently changing subject under someone who had only moved a dropdown.
+    Identical bytes describe the identical file set, so the result computed from
+    them is still the truth and is left alone.
     """
+    digest = hashlib.sha256(payload).hexdigest()
+    held = _uploaded().get(kind)
+    if (
+        held is not None
+        and held.get("digest") == digest
+        and held.get("filename") == name
+    ):
+        return None
     problem = validate(kind, name, payload)
     if problem is not None:
         return problem
@@ -2167,13 +2201,29 @@ def _accept(kind: SourceKind, name: str, payload: bytes) -> UploadProblem | None
         "filename": name,
         "rows": row_count(kind, payload),
         "bytes": len(payload),
+        "digest": digest,
     }
     _discard_upload_result()
     return None
 
 
+def _dismissed_key(kind: SourceKind) -> str:
+    """Where the id of a removed upload is remembered, per source.
+
+    Not a widget key, deliberately. Streamlit refuses both a write to a
+    ``file_uploader``'s key and a read of the click before the widget above it
+    is drawn, so **Remove** cannot empty the uploader itself -- the browser goes
+    on handing the same file back on every rerun afterwards. Recording *which
+    upload* was removed is the one thing that does work, and it is precise:
+    ``file_id`` names an upload event, so dropping a file and then choosing the
+    identical file again is a new event and is accepted.
+    """
+    return f"upload_dismissed_{kind.name}"
+
+
 def _upload_card(kind: SourceKind) -> None:
     """One optional source: drop a file, or do not."""
+    widget_key = f"upload_{kind.name}"
     held = _uploaded().get(kind)
     st.markdown(
         f'<div class="ll-drop{" ll-have" if held else ""}">'
@@ -2186,9 +2236,16 @@ def _upload_card(kind: SourceKind) -> None:
     chosen = st.file_uploader(
         kind.label,
         type=["json"] if kind is SourceKind.PROCESSOR else ["csv"],
-        key=f"upload_{kind.name}",
+        key=widget_key,
         label_visibility="collapsed",
     )
+    if chosen is not None and st.session_state.get(_dismissed_key(kind)) == getattr(
+        chosen, "file_id", None
+    ):
+        # Removed by the reader on an earlier run. The widget still holds it and
+        # always will, so the removal has to be honoured here rather than in the
+        # button that asked for it.
+        chosen = None
     if chosen is not None:
         payload = chosen.getvalue()
         detected = detect(chosen.name, payload)
@@ -2212,6 +2269,10 @@ def _upload_card(kind: SourceKind) -> None:
             path = _session_upload_dir() / kind.value
             if path.is_file():
                 path.unlink()
+            if chosen is not None:
+                st.session_state[_dismissed_key(kind)] = getattr(
+                    chosen, "file_id", None
+                )
             _discard_upload_result()
             st.rerun()
 
@@ -2431,17 +2492,27 @@ def screen_run() -> None:
         splits, difficulties = list(SplitName), list(Difficulty)
         split = _picked(
             columns[0].selectbox(
-                "Split", splits, format_func=lambda value: value.value, index=0
+                "Split",
+                splits,
+                format_func=lambda value: value.value,
+                index=0,
+                key="gen_split",
             ),
             splits,
         )
         difficulty = _picked(
             columns[1].selectbox(
-                "Difficulty", difficulties, format_func=lambda value: value.value, index=1
+                "Difficulty",
+                difficulties,
+                format_func=lambda value: value.value,
+                index=1,
+                key="gen_difficulty",
             ),
             difficulties,
         )
-        seed = columns[2].number_input("Seed", min_value=0, value=42, step=1)
+        seed = columns[2].number_input(
+            "Seed", min_value=0, value=42, step=1, key="gen_seed"
+        )
         if st.button("Generate", key="generate"):
             config = GeneratorConfig(split=split, difficulty=difficulty, seed=int(seed))
             target = _data_root() / f"{split.value}-{difficulty.value}-{int(seed)}"
@@ -2457,7 +2528,17 @@ def screen_run() -> None:
 
     st.subheader("Reconcile")
     chosen = _picked(
-        st.selectbox("Dataset", datasets, format_func=lambda path: path.name),
+        st.selectbox(
+            "Dataset",
+            datasets,
+            format_func=lambda path: path.name,
+            # Keyed for the same reason the report picker is: the options are a
+            # directory listing, and generating a dataset changes it. Unkeyed,
+            # the reader's choice of corpus was lost the moment they made a new
+            # one -- and the next press of the primary button would have
+            # reconciled a corpus they had not selected.
+            key="run_dataset",
+        ),
         datasets,
     )
     bundle_path = _bundle_path()
@@ -2465,6 +2546,7 @@ def screen_run() -> None:
         "Apply the fitted calibration bundle",
         value=bundle_path.is_file(),
         disabled=not bundle_path.is_file(),
+        key="run_use_bundle",
         help=(
             "Thresholds fitted on the `calibration` split, never on `test`. "
             "Without it the residual tiers keep the provisional probabilities "
@@ -2513,6 +2595,56 @@ def screen_run() -> None:
         st.rerun()
 
 
+#: Session-state key holding the id of the report the reader is looking at.
+#:
+#: The current report is **state**, not a widget default. Handing ``st.radio``
+#: a list of :class:`StoredRun` objects with no key made it the opposite of
+#: that: Streamlit derives an unkeyed widget's identity from its own arguments,
+#: so the identity of the picker was a function of which runs happened to be on
+#: disk and what :func:`report_labels` had numbered them. Add a run, delete one,
+#: or let the labels renumber, and the stored choice belongs to a widget that no
+#: longer exists -- the picker snaps back to the first entry, and the tabs
+#: change subject under a reader who never asked them to. Keying it by run id
+#: makes the choice outlive anything a filter, a search or a tab can do to the
+#: page, because none of them can change a run id.
+_REPORT_KEY = "report_id"
+
+
+def _selected_report(
+    runs: Sequence[StoredRun], labels: dict[str, str]
+) -> StoredRun | None:
+    """Draw the report picker and resolve it to the one report on screen.
+
+    The widget's value is a run id and nothing else. Every screen is then handed
+    the object that id resolves to, so "which report" has exactly one answer per
+    script run and no rerun can quietly supply a different one.
+    """
+    if not runs:
+        st.session_state.pop(_REPORT_KEY, None)
+        st.info("No reports yet. Create one on the **Sample data** tab.")
+        return None
+    by_id = {run.run_id: run for run in runs}
+    run_ids = list(by_id)
+    # A report that is no longer on disk cannot stay selected, and Streamlit
+    # raises rather than choose for us. This is the only place in this file
+    # where the subject changes without the reader saying so, it happens only
+    # when the subject genuinely stopped existing, and it still never reaches
+    # for a sample: it falls to the first report in the list, labelled.
+    if st.session_state.get(_REPORT_KEY) not in by_id:
+        st.session_state.pop(_REPORT_KEY, None)
+    chosen = _picked(
+        st.radio(
+            "Reports",
+            run_ids,
+            format_func=lambda run_id: labels.get(run_id, run_id),
+            key=_REPORT_KEY,
+            label_visibility="collapsed",
+        ),
+        run_ids,
+    )
+    return by_id[chosen]
+
+
 # --------------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(page_title="LedgerLoop", page_icon="🧾", layout="wide")
@@ -2552,26 +2684,39 @@ def main() -> None:
             )
         else:
             showing_upload = False
-        if runs:
-            # Labelled by what the report *is*, not by the run id. `t0t4-test-42`
-            # names a ladder, a split and a seed: exactly what someone
-            # reproducing a figure needs, and exactly what someone reading one
-            # does not. The full id is in the details expander below.
-            selected: Any = st.radio(
-                "Reports",
-                runs,
-                format_func=lambda run: labels.get(run.run_id, run.run_id),
-                label_visibility="collapsed",
+        # Labelled by what the report *is*, not by the run id. `t0t4-test-42`
+        # names a ladder, a split and a seed: exactly what someone reproducing a
+        # figure needs, and exactly what someone reading one does not. The full
+        # id is in the details expander below.
+        selected = _selected_report(runs, labels)
+        if showing_upload and upload is not None:
+            # The summary block has to describe whatever the tabs describe. It
+            # used to describe `selected` unconditionally, so a reader looking
+            # at their own files read a stored sample's record count and clean
+            # bill of health beside them -- two subjects, one heading, and no
+            # way to tell which number belonged to which.
+            st.divider()
+            st.markdown("**Current report**")
+            up_view = upload_snapshot(upload)
+            st.caption(f"{up_view.records:,} records you uploaded")
+            st.caption(
+                f"{up_view.matched:,} matched · {up_view.queue:,} waiting for a "
+                "person"
             )
-        else:
-            selected = None
-            st.info("No reports yet. Create one on the **New report** tab.")
+            # No "Reconciliation complete" pill. `UploadSnapshot.incorrect` is
+            # `None` by construction because nobody hand-checked these files,
+            # and a green tick would be a claim about accuracy that was never
+            # measured.
         if selected is not None:
             dataset = selected.summary.get("dataset", {})
             config = selected.summary.get("config", {})
             st.divider()
             view = snapshot(selected)
-            st.markdown("**Current report**")
+            if showing_upload and upload is not None:
+                st.markdown("**Selected sample report**")
+                st.caption("Not on screen. Switch subject above to read it.")
+            else:
+                st.markdown("**Current report**")
             # The same figure the Overview leads with, so the two never
             # disagree on screen. Falls back to the raw record count on an older
             # report that did not store the reconcilable total.
